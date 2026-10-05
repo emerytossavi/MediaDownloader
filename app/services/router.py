@@ -7,7 +7,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional, Tuple
 from app.services.facebook_downloader import (
+    download_facebook_media,
     download_facebook_photos,
+    is_facebook_story_url,
     is_facebook_url,
     resolve_facebook_url,
 )
@@ -18,7 +20,12 @@ from app.services.instagram_photo_downloader import (
 )
 from app.services.media_inspector import MediaInspectionResult, MediaType, inspect_directory
 from app.services.task_manager import DownloadTask
-from app.services.tiktok_photo_downloader import download_tiktok_photos, is_tiktok_url
+from app.services.tiktok_photo_downloader import (
+    download_tiktok_media,
+    download_tiktok_photos,
+    is_tiktok_url,
+    resolve_tiktok_url,
+)
 from app.services.twitter_downloader import download_twitter_media, is_twitter_url
 from app.services.ytdlp_downloader import (
     AuthenticationRequiredError,
@@ -58,8 +65,8 @@ class ExtractorRouter:
         self.cookies_file = cookies_file
         self.cookies_browser = cookies_browser
 
-    def detect_primary_extractor(self, url: str) -> ExtractorType:
-        """Inspect URL using native extractor matching in gallery-dl and yt-dlp."""
+    def detect_extractors(self, url: str) -> List[ExtractorType]:
+        """Inspect URL using native extractor matching in gallery-dl and yt-dlp and return valid engines."""
         gallery_supported = False
         try:
             import gallery_dl.extractor  # type: ignore
@@ -82,31 +89,31 @@ class ExtractorRouter:
         except Exception as exc:
             logger.debug(f"yt-dlp detection error: {exc}")
 
-        # Routing heuristic:
-        # 1. If only one is supported, pick that one
-        if gallery_supported and not ytdlp_supported:
-            return ExtractorType.GALLERYDL
+        # If only one tool supports this platform, NEVER attempt the other as fallback!
+        # (ex: YouTube/Vimeo are exclusively supported by yt-dlp, calling gallery-dl causes Unsupported URL errors)
         if ytdlp_supported and not gallery_supported:
-            return ExtractorType.YTDLP
+            return [ExtractorType.YTDLP]
+        if gallery_supported and not ytdlp_supported:
+            return [ExtractorType.GALLERYDL]
 
-        # 2. If both match (e.g. Instagram, Reddit, Twitter, TikTok, Pinterest), prioritize based on URL hints:
-        url_lower = url.lower()
-        if any(hint in url_lower for hint in ["/reel/", "/video/", "watch?v=", "/shorts/", "/v/"]):
-            return ExtractorType.YTDLP
-        if any(hint in url_lower for hint in ["/p/", "/album/", "/gallery/", "/art/", "/photo/", "/photos/", "/photo.php", "/image/", "/images/", "/posts/"]):
-            return ExtractorType.GALLERYDL
+        # If both match (e.g. Instagram, Reddit, Twitter, TikTok, Pinterest):
+        if ytdlp_supported and gallery_supported:
+            url_lower = url.lower()
+            if any(hint in url_lower for hint in ["/reel/", "/video/", "watch?v=", "/shorts/", "/v/"]):
+                return [ExtractorType.YTDLP, ExtractorType.GALLERYDL]
+            if any(hint in url_lower for hint in ["/p/", "/album/", "/gallery/", "/art/", "/photo/", "/photos/", "/photo.php", "/image/", "/images/", "/posts/"]):
+                return [ExtractorType.GALLERYDL, ExtractorType.YTDLP]
+            if "pinterest." in url_lower or "pin.it" in url_lower:
+                return [ExtractorType.GALLERYDL, ExtractorType.YTDLP]
+            return [ExtractorType.YTDLP, ExtractorType.GALLERYDL]
 
-        # Pinterest est principalement une plateforme d'images (gallery-dl gère images et vidéos nativement)
-        if ("pinterest." in url_lower or "pin.it" in url_lower) and gallery_supported:
-            return ExtractorType.GALLERYDL
+        # Default fallback for direct media or generic links
+        return [ExtractorType.YTDLP, ExtractorType.GALLERYDL]
 
-        # Default preference if both match: yt-dlp first (it extracts both video and audio)
-        if ytdlp_supported:
-            return ExtractorType.YTDLP
-        if gallery_supported:
-            return ExtractorType.GALLERYDL
-
-        return ExtractorType.UNKNOWN
+    def detect_primary_extractor(self, url: str) -> ExtractorType:
+        """Inspect URL using native extractor matching in gallery-dl and yt-dlp."""
+        extractors = self.detect_extractors(url)
+        return extractors[0] if extractors else ExtractorType.UNKNOWN
 
     async def execute_download(
         self,
@@ -121,19 +128,16 @@ class ExtractorRouter:
                 logger.info(f"[Task {task.task_id}] URL Facebook résolue: {task.url} -> {resolved}")
                 task.url = resolved
 
-        primary = self.detect_primary_extractor(task.url)
-        logger.info(f"[Task {task.task_id}] Primary extractor detected: {primary.value} for {task.url}")
+        # Résolution des liens de partage raccourcis TikTok (ex: vt.tiktok.com, vm.tiktok.com)
+        if is_tiktok_url(task.url):
+            resolved_tt = await asyncio.to_thread(resolve_tiktok_url, task.url)
+            if resolved_tt != task.url:
+                logger.info(f"[Task {task.task_id}] URL TikTok résolue: {task.url} -> {resolved_tt}")
+                task.url = resolved_tt
 
-        if primary == ExtractorType.UNKNOWN:
-            # Try yt-dlp as a last attempt before giving up (handles many direct media links)
-            primary = ExtractorType.YTDLP
-
-        # Plan execution sequence: primary first, secondary as fallback
-        sequence = (
-            [ExtractorType.YTDLP, ExtractorType.GALLERYDL]
-            if primary == ExtractorType.YTDLP
-            else [ExtractorType.GALLERYDL, ExtractorType.YTDLP]
-        )
+        sequence = self.detect_extractors(task.url)
+        primary = sequence[0]
+        logger.info(f"[Task {task.task_id}] Primary extractor detected: {primary.value} (sequence: {[t.value for t in sequence]}) for {task.url}")
 
         # Tentative d'extraction directe des diaporamas / photos TikTok si l'URL est de TikTok
         if is_tiktok_url(task.url):
@@ -150,6 +154,29 @@ class ExtractorRouter:
                         return ExtractorType.GALLERYDL, inspection
             except Exception as exc:
                 logger.debug(f"[Task {task.task_id}] L'extracteur TikTok photo a échoué: {exc}")
+
+        # Tentative d'extraction directe des Stories Facebook via getmyfb
+        if is_facebook_story_url(task.url):
+            try:
+                extracted = await download_facebook_media(
+                    task=task,
+                    target_dir=target_dir,
+                    timeout=self.download_timeout,
+                    cookies_file=self.cookies_file,
+                )
+                if extracted:
+                    inspection = inspect_directory(target_dir, max_file_size=self.max_file_size)
+                    if inspection.has_valid_media or inspection.has_oversized_media:
+                        logger.info(f"[Task {task.task_id}] Story Facebook extraite directement avec succès via getmyfb.")
+                        extractor_used = (
+                            ExtractorType.GALLERYDL
+                            if any(i.media_type == MediaType.PHOTO for i in inspection.valid_items)
+                            and not any(i.media_type == MediaType.VIDEO for i in inspection.valid_items)
+                            else ExtractorType.YTDLP
+                        )
+                        return extractor_used, inspection
+            except Exception as exc:
+                logger.debug(f"[Task {task.task_id}] Extraction directe story Facebook via getmyfb a échoué: {exc}")
 
         last_error: Optional[Exception] = None
         executed_tool: ExtractorType = primary
@@ -256,6 +283,28 @@ class ExtractorRouter:
                         return extractor_used, result
             except Exception as exc:
                 logger.debug(f"[Task {task.task_id}] Échec extracteur Twitter bypass: {exc}")
+
+        # Tentative d'extraction spécialisée TikTok (contournement anti-bot/Cloudflare si échec yt-dlp & gallery-dl)
+        if is_tiktok_url(task.url) and not task.cancel_event.is_set():
+            try:
+                tt_ok = await download_tiktok_media(
+                    task=task,
+                    target_dir=target_dir,
+                    timeout=self.download_timeout,
+                )
+                if tt_ok:
+                    result = inspect_directory(target_dir, max_file_size=self.max_file_size)
+                    if result.has_valid_media or result.has_oversized_media:
+                        logger.info(f"[Task {task.task_id}] Média TikTok extrait avec succès via API de contournement.")
+                        extractor_used = (
+                            ExtractorType.GALLERYDL
+                            if any(i.media_type == MediaType.PHOTO for i in result.valid_items)
+                            and not any(i.media_type == MediaType.VIDEO for i in result.valid_items)
+                            else ExtractorType.YTDLP
+                        )
+                        return extractor_used, result
+            except Exception as exc:
+                logger.debug(f"[Task {task.task_id}] Échec extracteur TikTok bypass: {exc}")
 
         # If both attempts failed or produced no files:
         final_inspection = inspect_directory(target_dir, max_file_size=self.max_file_size)

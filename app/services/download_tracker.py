@@ -37,7 +37,7 @@ def detect_url_category(url: str) -> str:
         return "inconnu"
 
     # Plateformes courantes avec correspondance exacte ou sous-domaine
-    if _matches_domain(domain, ["tiktok.com", "douyin.com"]):
+    if _matches_domain(domain, ["tiktok.com", "douyin.com", "tiktokv.com"]):
         return "tiktok"
     if _matches_domain(domain, ["instagram.com", "instagr.am"]):
         return "instagram"

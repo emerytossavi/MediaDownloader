@@ -14,6 +14,26 @@ def test_router_detection_video_platforms():
     router = ExtractorRouter(max_file_size=50 * 1024 * 1024, download_timeout=60)
     assert router.detect_primary_extractor("https://www.youtube.com/watch?v=dQw4w9WgXcQ") == ExtractorType.YTDLP
     assert router.detect_primary_extractor("https://vimeo.com/123456") == ExtractorType.YTDLP
+    assert router.detect_extractors("https://youtu.be/56lkofpjOAs") == [ExtractorType.YTDLP]
+
+
+@pytest.mark.asyncio
+async def test_router_youtube_never_calls_gallerydl(tmp_path: Path):
+    router = ExtractorRouter(max_file_size=50 * 1024 * 1024, download_timeout=60)
+    task = DownloadTask(task_id="t_yt", user_id=1, chat_id=1, url="https://youtu.be/56lkofpjOAs")
+
+    async def fake_ytdlp(*args, **kwargs):
+        raise ExtractorError("Le fichier vidéo dépasse la limite maximale autorisée (50 Mo) pour Telegram.")
+
+    async def fake_gallerydl(*args, **kwargs):
+        pytest.fail("gallery-dl should never be called on YouTube URLs")
+
+    with patch("app.services.router.download_with_ytdlp", side_effect=fake_ytdlp), \
+         patch("app.services.router.download_with_gallerydl", side_effect=fake_gallerydl):
+        with pytest.raises(ExtractorError) as exc_info:
+            await router.execute_download(task, tmp_path)
+        assert "dépasse la limite maximale" in str(exc_info.value)
+
 
 
 def test_router_detection_gallery_platforms():
@@ -41,3 +61,30 @@ async def test_router_execute_download_with_fallback(tmp_path: Path):
             assert tool == ExtractorType.GALLERYDL
             assert inspection.has_valid_media is True
             assert inspection.valid_items[0].filename == "001_photo.jpg"
+
+
+@pytest.mark.asyncio
+async def test_router_tiktok_fallback(tmp_path: Path):
+    router = ExtractorRouter(max_file_size=50 * 1024 * 1024, download_timeout=60)
+    task = DownloadTask(task_id="t_tt", user_id=1, chat_id=1, url="https://vt.tiktok.com/ZSbx3VA1S/")
+
+    async def fake_ytdlp(*args, **kwargs):
+        raise ExtractorError("TikTok challenge block")
+
+    async def fake_gallerydl(*args, **kwargs):
+        raise ExtractorError("La plateforme a bloqué la requête (protection anti-bot/Cloudflare).")
+
+    async def fake_tiktok_media(*args, **kwargs):
+        target_dir = kwargs.get("target_dir") or args[1]
+        (target_dir / "tiktok_123.mp4").write_bytes(b"mp4 content" * 100)
+        return True
+
+    with patch("app.services.router.download_with_ytdlp", side_effect=fake_ytdlp), \
+         patch("app.services.router.download_with_gallerydl", side_effect=fake_gallerydl), \
+         patch("app.services.router.download_tiktok_photos", return_value=False), \
+         patch("app.services.router.download_tiktok_media", side_effect=fake_tiktok_media):
+        tool, inspection = await router.execute_download(task, tmp_path)
+        assert tool == ExtractorType.YTDLP
+        assert inspection.has_valid_media is True
+        assert inspection.valid_items[0].filename == "tiktok_123.mp4"
+

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import shutil
 from typing import List, Optional
 from app.services.task_manager import DownloadTask
 from app.utils.logging import get_logger
@@ -47,24 +48,28 @@ async def download_with_ytdlp(
     # Safe output template with length restriction
     out_tmpl = str(target_dir / "%(title).80s-%(id)s.%(ext)s")
 
+    v_budget = max(1, max_size_mb - 5)
+    format_selector = (
+        f"b[filesize<={max_size_mb}M]/b[filesize_approx<={max_size_mb}M]/"
+        f"bestvideo[ext=mp4][filesize<={v_budget}M]+bestaudio[ext=m4a][filesize<=5M]/"
+        f"bestvideo[filesize<={v_budget}M]+bestaudio[filesize<=5M]/"
+        f"bestvideo[filesize_approx<={v_budget}M]+bestaudio[filesize_approx<=5M]/"
+        f"bestvideo[height<=1080][filesize<={v_budget}M]+bestaudio/"
+        f"bestvideo[height<=720][filesize<={v_budget}M]+bestaudio/"
+        f"bestvideo[height<=480][filesize<={v_budget}M]+bestaudio/"
+        f"bestvideo[height<=360][filesize<={v_budget}M]+bestaudio/"
+        f"bestvideo[filesize<={max_size_mb}M]+bestaudio/"
+        f"bestvideo[height<=720]+bestaudio/best[height<=720]/"
+        f"bestvideo[height<=480]+bestaudio/best[height<=480]/"
+        f"bestvideo+bestaudio/best"
+    )
+
     cmd: List[str] = [
         bin_path,
         "--no-playlist",
         "--restrict-filenames",
-        # Attempt to prioritize MP4/compatible streams under the limit
         "-f",
-        (
-            f"b[filesize<={max_size_mb}M]/b[filesize_approx<={max_size_mb}M]/"
-            f"hd[filesize<={max_size_mb}M]/hd/sd/"
-            f"bestvideo[ext=mp4][filesize<={max_size_mb}M]+bestaudio[ext=m4a]/"
-            f"bestvideo[filesize<={max_size_mb}M]+bestaudio/"
-            f"bestvideo[filesize_approx<={max_size_mb}M]+bestaudio/"
-            f"bestvideo[height<=720]+bestaudio/"
-            f"best[height<=720]/"
-            f"bestvideo[height<=480]+bestaudio/"
-            f"best[height<=480]/"
-            f"bestvideo+bestaudio/best"
-        ),
+        format_selector,
         "--max-filesize",
         f"{max_size_mb}M",
         "-o",
@@ -75,6 +80,13 @@ async def download_with_ytdlp(
         "--retries",
         "3",
     ]
+
+    # Support des runtimes JavaScript (Node, Deno, Bun) pour débloquer les challenges YouTube sans warning
+    for r_name in ["deno", "node", "bun", "quickjs"]:
+        r_path = shutil.which(r_name)
+        if r_path:
+            cmd.extend(["--js-runtimes", f"{r_name}:{r_path}"])
+            break
 
     if ffmpeg_bin:
         cmd.extend(["--ffmpeg-location", ffmpeg_bin])
@@ -143,7 +155,7 @@ async def download_with_ytdlp(
     has_video = any(f.suffix.lower() in video_exts for f in downloaded_files)
     audio_files = [f for f in downloaded_files if f.suffix.lower() in audio_exts]
 
-    if not has_video and audio_files and "file is larger than max-filesize" in all_output:
+    if not has_video and "larger than max-filesize" in all_output:
         logger.warning(
             f"[Task {task.task_id}] Le flux vidéo a dépassé {max_size_mb}M et a été ignoré par yt-dlp. "
             f"Suppression du flux audio isolé."
@@ -153,7 +165,12 @@ async def download_with_ytdlp(
                 a.unlink()
             except OSError:
                 pass
-        raise ExtractorError("Le fichier vidéo dépasse la limite maximale autorisée (50 MiB) pour Telegram.")
+        raise ExtractorError(f"Le fichier vidéo dépasse la limite maximale autorisée ({max_size_mb} Mo) pour Telegram.")
+
+    if not downloaded_files:
+        if process.returncode != 0:
+            _classify_ytdlp_error(stderr_text)
+        raise ContentNotFoundError("Aucun média vidéo téléchargeable trouvé à cette adresse.")
 
 
 def _classify_ytdlp_error(stderr: str) -> None:

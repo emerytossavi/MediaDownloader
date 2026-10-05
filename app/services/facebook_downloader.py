@@ -24,6 +24,12 @@ def is_facebook_url(url: str) -> bool:
     return any(domain in lower for domain in ["facebook.com", "fb.watch", "fb.com", "m.facebook.com"])
 
 
+def is_facebook_story_url(url: str) -> bool:
+    """Check if the URL belongs to Facebook Stories."""
+    lower = url.lower()
+    return is_facebook_url(url) and any(domain in lower for domain in ["/stories/", "story.php"])
+
+
 def resolve_facebook_url(url: str, timeout: int = 10) -> str:
     """Resolve redirect for Facebook share URLs (e.g. facebook.com/share/...)."""
     lower = url.lower()

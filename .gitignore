@@ -58,3 +58,6 @@ htmlcov/
 *.swo
 *~
 .DS_Store
+
+
+downloads_history.json

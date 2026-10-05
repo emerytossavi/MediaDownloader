@@ -66,10 +66,98 @@ async def test_gallerydl_command_args(tmp_path: Path):
 
 
 def test_is_tiktok_url():
-    from app.services.tiktok_photo_downloader import is_tiktok_url
+    from app.services.tiktok_photo_downloader import is_tiktok_short_url, is_tiktok_url
     assert is_tiktok_url("https://vt.tiktok.com/ZSb93AEpS/") is True
     assert is_tiktok_url("https://www.tiktok.com/@user/photo/12345") is True
     assert is_tiktok_url("https://www.instagram.com/p/123") is False
+
+    assert is_tiktok_short_url("https://vt.tiktok.com/ZSbx3CSDH/") is True
+    assert is_tiktok_short_url("https://vm.tiktok.com/ZSbx3CSDH/") is True
+    assert is_tiktok_short_url("https://www.tiktok.com/t/ZSbx3CSDH/") is True
+    assert is_tiktok_short_url("https://www.tiktok.com/@user/video/123") is False
+
+
+@pytest.mark.asyncio
+async def test_download_tiktok_photos_tikwm(tmp_path: Path):
+    from unittest.mock import MagicMock
+    from app.services.tiktok_photo_downloader import download_tiktok_photos
+
+    task = DownloadTask(
+        task_id="test-tt-photos",
+        user_id=123,
+        chat_id=123,
+        url="https://vt.tiktok.com/ZSbx3CSDH/",
+    )
+
+    mock_api_resp = MagicMock()
+    mock_api_resp.status_code = 200
+    mock_api_resp.json.return_value = {
+        "code": 0,
+        "msg": "success",
+        "data": {
+            "title": "Test Photo Post",
+            "images": [
+                "https://example.com/img1.jpeg",
+                "https://example.com/img2.jpeg",
+            ],
+            "music": "https://example.com/audio.mp3",
+        },
+    }
+
+    mock_img_resp = MagicMock()
+    mock_img_resp.status_code = 200
+    mock_img_resp.content = b"fake_jpeg_content"
+
+    mock_sess = MagicMock()
+    mock_sess.get.side_effect = [mock_api_resp, mock_img_resp, mock_img_resp, mock_img_resp]
+
+    with patch("curl_cffi.requests.Session", return_value=mock_sess), \
+         patch("app.services.tiktok_photo_downloader.resolve_tiktok_url", return_value=task.url):
+        ok = await download_tiktok_photos(task, tmp_path, timeout=10)
+
+    assert ok is True
+    jpeg_files = list(tmp_path.glob("*.jpeg"))
+    assert len(jpeg_files) == 2
+
+
+@pytest.mark.asyncio
+async def test_download_tiktok_media_video_tikwm(tmp_path: Path):
+    from unittest.mock import MagicMock
+    from app.services.tiktok_photo_downloader import download_tiktok_media
+
+    task = DownloadTask(
+        task_id="test-tt-video",
+        user_id=123,
+        chat_id=123,
+        url="https://vt.tiktok.com/ZSbx3VA1S/",
+    )
+
+    mock_api_resp = MagicMock()
+    mock_api_resp.status_code = 200
+    mock_api_resp.json.return_value = {
+        "code": 0,
+        "msg": "success",
+        "data": {
+            "title": "Test Video Post",
+            "images": [],
+            "play": "https://example.com/video.mp4",
+        },
+    }
+
+    mock_vid_resp = MagicMock()
+    mock_vid_resp.status_code = 200
+    mock_vid_resp.content = b"fake_video_mp4_bytes"
+
+    mock_sess = MagicMock()
+    mock_sess.get.side_effect = [mock_api_resp, mock_vid_resp]
+
+    with patch("curl_cffi.requests.Session", return_value=mock_sess), \
+         patch("app.services.tiktok_photo_downloader.resolve_tiktok_url", return_value=task.url):
+        ok = await download_tiktok_media(task, tmp_path, timeout=10)
+
+    assert ok is True
+    mp4_files = list(tmp_path.glob("*.mp4"))
+    assert len(mp4_files) == 1
 
 
 def test_is_instagram_url():
@@ -80,10 +168,13 @@ def test_is_instagram_url():
 
 
 def test_is_facebook_url():
-    from app.services.facebook_downloader import is_facebook_url, resolve_facebook_url
+    from app.services.facebook_downloader import is_facebook_story_url, is_facebook_url, resolve_facebook_url
     assert is_facebook_url("https://www.facebook.com/share/19WZ9BuC2F/") is True
     assert is_facebook_url("https://fb.watch/xyz/") is True
     assert is_facebook_url("https://www.instagram.com/p/123") is False
+
+    assert is_facebook_story_url("https://www.facebook.com/stories/110425051397756/12345/") is True
+    assert is_facebook_story_url("https://www.facebook.com/reel/12345") is False
 
     # URLs not matching share pattern should return immediately
     assert resolve_facebook_url("https://www.facebook.com/user/posts/123") == "https://www.facebook.com/user/posts/123"
