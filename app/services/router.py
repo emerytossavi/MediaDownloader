@@ -2,18 +2,30 @@
 
 from __future__ import annotations
 
+import asyncio
 from enum import Enum
 from pathlib import Path
 from typing import Optional, Tuple
+from app.services.facebook_downloader import (
+    download_facebook_photos,
+    is_facebook_url,
+    resolve_facebook_url,
+)
 from app.services.gallerydl_downloader import download_with_gallerydl
 from app.services.instagram_photo_downloader import (
     download_instagram_photos,
     is_instagram_url,
 )
-from app.services.media_inspector import MediaInspectionResult, inspect_directory
+from app.services.media_inspector import MediaInspectionResult, MediaType, inspect_directory
 from app.services.task_manager import DownloadTask
 from app.services.tiktok_photo_downloader import download_tiktok_photos, is_tiktok_url
-from app.services.ytdlp_downloader import download_with_ytdlp, ExtractorError
+from app.services.twitter_downloader import download_twitter_media, is_twitter_url
+from app.services.ytdlp_downloader import (
+    AuthenticationRequiredError,
+    ContentNotFoundError,
+    download_with_ytdlp,
+    ExtractorError,
+)
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -36,6 +48,7 @@ class ExtractorRouter:
         gallerydl_bin: str = "gallery-dl",
         ffmpeg_bin: Optional[str] = None,
         cookies_file: Optional[Path] = None,
+        cookies_browser: Optional[str] = None,
     ) -> None:
         self.max_file_size = max_file_size
         self.download_timeout = download_timeout
@@ -43,6 +56,7 @@ class ExtractorRouter:
         self.gallerydl_bin = gallerydl_bin
         self.ffmpeg_bin = ffmpeg_bin
         self.cookies_file = cookies_file
+        self.cookies_browser = cookies_browser
 
     def detect_primary_extractor(self, url: str) -> ExtractorType:
         """Inspect URL using native extractor matching in gallery-dl and yt-dlp."""
@@ -79,7 +93,7 @@ class ExtractorRouter:
         url_lower = url.lower()
         if any(hint in url_lower for hint in ["/reel/", "/video/", "watch?v=", "/shorts/", "/v/"]):
             return ExtractorType.YTDLP
-        if any(hint in url_lower for hint in ["/p/", "/album/", "/gallery/", "/art/", "/photo/", "/photos/", "/image/", "/images/"]):
+        if any(hint in url_lower for hint in ["/p/", "/album/", "/gallery/", "/art/", "/photo/", "/photos/", "/photo.php", "/image/", "/images/", "/posts/"]):
             return ExtractorType.GALLERYDL
 
         # Pinterest est principalement une plateforme d'images (gallery-dl gère images et vidéos nativement)
@@ -100,6 +114,13 @@ class ExtractorRouter:
         target_dir: Path,
     ) -> Tuple[ExtractorType, MediaInspectionResult]:
         """Download media using the primary strategy, with automatic fallback if 0 files produced."""
+        # Résolution des liens de partage raccourcis (ex: facebook.com/share/)
+        if is_facebook_url(task.url):
+            resolved = await asyncio.to_thread(resolve_facebook_url, task.url)
+            if resolved != task.url:
+                logger.info(f"[Task {task.task_id}] URL Facebook résolue: {task.url} -> {resolved}")
+                task.url = resolved
+
         primary = self.detect_primary_extractor(task.url)
         logger.info(f"[Task {task.task_id}] Primary extractor detected: {primary.value} for {task.url}")
 
@@ -150,6 +171,7 @@ class ExtractorRouter:
                         bin_path=self.ytdlp_bin,
                         ffmpeg_bin=self.ffmpeg_bin,
                         cookies_file=self.cookies_file,
+                        cookies_browser=self.cookies_browser,
                     )
                 else:
                     await download_with_gallerydl(
@@ -158,6 +180,7 @@ class ExtractorRouter:
                         timeout=self.download_timeout,
                         bin_path=self.gallerydl_bin,
                         cookies_file=self.cookies_file,
+                        cookies_browser=self.cookies_browser,
                     )
 
                 # Inspect directory to see if any media was produced
@@ -179,6 +202,7 @@ class ExtractorRouter:
                     target_dir=target_dir,
                     timeout=self.download_timeout,
                     cookies_file=self.cookies_file,
+                    cookies_browser=self.cookies_browser,
                 )
                 if ig_photos:
                     result = inspect_directory(target_dir, max_file_size=self.max_file_size)
@@ -188,12 +212,70 @@ class ExtractorRouter:
             except Exception as exc:
                 logger.debug(f"[Task {task.task_id}] Échec extracteur Instagram photo: {exc}")
 
+        # Tentative d'extraction spécialisée des photos Facebook si aucun média n'a été produit
+        if is_facebook_url(task.url) and not task.cancel_event.is_set():
+            try:
+                fb_photos = await download_facebook_photos(
+                    task=task,
+                    target_dir=target_dir,
+                    timeout=self.download_timeout,
+                    cookies_file=self.cookies_file,
+                )
+                if fb_photos:
+                    result = inspect_directory(target_dir, max_file_size=self.max_file_size)
+                    if result.has_valid_media or result.has_oversized_media:
+                        logger.info(f"[Task {task.task_id}] Médias Facebook extraits avec succès.")
+                        extractor_used = (
+                            ExtractorType.GALLERYDL
+                            if any(i.media_type == MediaType.PHOTO for i in result.valid_items)
+                            and not any(i.media_type == MediaType.VIDEO for i in result.valid_items)
+                            else ExtractorType.YTDLP
+                        )
+                        return extractor_used, result
+            except Exception as exc:
+                logger.debug(f"[Task {task.task_id}] Échec extracteur Facebook photo: {exc}")
+
+        # Tentative d'extraction spécialisée Twitter/X (contournement des restrictions de sensibilité/NSFW)
+        if is_twitter_url(task.url) and not task.cancel_event.is_set():
+            try:
+                tw_ok = await download_twitter_media(
+                    task=task,
+                    target_dir=target_dir,
+                    timeout=self.download_timeout,
+                )
+                if tw_ok:
+                    result = inspect_directory(target_dir, max_file_size=self.max_file_size)
+                    if result.has_valid_media or result.has_oversized_media:
+                        logger.info(f"[Task {task.task_id}] Média Twitter extrait avec succès via API de contournement.")
+                        extractor_used = (
+                            ExtractorType.GALLERYDL
+                            if any(i.media_type == MediaType.PHOTO for i in result.valid_items)
+                            and not any(i.media_type == MediaType.VIDEO for i in result.valid_items)
+                            else ExtractorType.YTDLP
+                        )
+                        return extractor_used, result
+            except Exception as exc:
+                logger.debug(f"[Task {task.task_id}] Échec extracteur Twitter bypass: {exc}")
+
         # If both attempts failed or produced no files:
         final_inspection = inspect_directory(target_dir, max_file_size=self.max_file_size)
         if final_inspection.has_valid_media or final_inspection.has_oversized_media:
             return executed_tool, final_inspection
 
         if last_error:
+            err_str = str(last_error).lower()
+            if (
+                "no video could be found" in err_str
+                or "no video formats found" in err_str
+                or "aucun média vidéo" in err_str
+            ):
+                raise ContentNotFoundError(
+                    "Aucun média téléchargeable trouvé dans ce tweet (publication textuelle uniquement)."
+                )
+            if "'unavailable'" in err_str or "unavailable" in err_str or "tombstone" in err_str:
+                raise ContentNotFoundError(
+                    "Ce tweet est indisponible ou a été supprimé de Twitter/X."
+                )
             raise last_error
 
         raise ExtractorError("Aucun média n'a pu être extrait depuis cette URL.")

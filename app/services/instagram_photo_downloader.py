@@ -26,6 +26,7 @@ async def download_instagram_photos(
     target_dir: Path,
     timeout: int = 30,
     cookies_file: Optional[Path] = None,
+    cookies_browser: Optional[str] = None,
 ) -> bool:
     """Extrait et télécharge les photos et carrousels d'un post Instagram."""
     cmd = [
@@ -38,6 +39,8 @@ async def download_instagram_photos(
     ]
     if cookies_file and Path(cookies_file).exists():
         cmd.extend(["--cookies", str(cookies_file)])
+    elif cookies_browser:
+        cmd.extend(["--cookies-from-browser", cookies_browser])
     cmd.append(task.url)
 
     logger.info(f"[Task {task.task_id}] Extraction des photos Instagram via métadonnées...")

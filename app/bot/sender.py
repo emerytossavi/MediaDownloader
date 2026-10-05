@@ -32,10 +32,11 @@ class MediaSender:
         # Separate items by media type
         photos = [item for item in result.valid_items if item.media_type == MediaType.PHOTO]
         videos = [item for item in result.valid_items if item.media_type == MediaType.VIDEO]
-        others = [
+        audios = [item for item in result.valid_items if item.media_type == MediaType.AUDIO]
+        documents = [
             item
             for item in result.valid_items
-            if item.media_type not in {MediaType.PHOTO, MediaType.VIDEO}
+            if item.media_type not in {MediaType.PHOTO, MediaType.VIDEO, MediaType.AUDIO}
         ]
 
         sent_count = 0
@@ -52,8 +53,13 @@ class MediaSender:
             if await self._send_single_video(chat_id, video):
                 sent_count += 1
 
-        # 3. Send Others (Audio / Documents)
-        for item in others:
+        # 3. Send Audios
+        for audio in audios:
+            if await self._send_single_audio(chat_id, audio):
+                sent_count += 1
+
+        # 4. Send Documents
+        for item in documents:
             if await self._send_document(chat_id, item):
                 sent_count += 1
 
@@ -117,6 +123,21 @@ class MediaSender:
             return True
         except TelegramError as exc:
             logger.warning(f"send_video failed for {item.filename} ({exc}). Falling back to document.")
+            return await self._send_document(chat_id, item)
+
+    async def _send_single_audio(self, chat_id: int, item: MediaItem) -> bool:
+        try:
+            with open(item.path, "rb") as f:
+                await self.bot.send_audio(
+                    chat_id=chat_id,
+                    audio=f,
+                    caption=f"🎵 {item.filename}",
+                    read_timeout=120,
+                    write_timeout=120,
+                )
+            return True
+        except TelegramError as exc:
+            logger.warning(f"send_audio failed for {item.filename} ({exc}). Falling back to document.")
             return await self._send_document(chat_id, item)
 
     async def _send_document(self, chat_id: int, item: MediaItem) -> bool:

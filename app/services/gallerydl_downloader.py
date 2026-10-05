@@ -24,6 +24,7 @@ async def download_with_gallerydl(
     timeout: int,
     bin_path: str = "gallery-dl",
     cookies_file: Optional[Path] = None,
+    cookies_browser: Optional[str] = None,
 ) -> None:
     """Download images/galleries using gallery-dl via an isolated asynchronous subprocess."""
     cmd: List[str] = [
@@ -41,6 +42,8 @@ async def download_with_gallerydl(
 
     if cookies_file and Path(cookies_file).exists():
         cmd.extend(["--cookies", str(cookies_file)])
+    elif cookies_browser:
+        cmd.extend(["--cookies-from-browser", cookies_browser])
 
     cmd.append(task.url)
 
@@ -106,7 +109,8 @@ def _classify_gallerydl_error(stderr: str) -> None:
 
     if "requested user could not be found" in lower or "user could not be found" in lower:
         raise AuthenticationRequiredError(
-            "Ce contenu (Story ou compte restreint) nécessite un compte connecté sur Instagram."
+            "Cette Story Instagram nécessite une session connectée (cookies manquants ou expirés). "
+            "Configurez COOKIES_FILE ou COOKIES_BROWSER pour télécharger les Stories."
         )
 
     if any(phrase in lower for phrase in ["401", "unauthorized", "login", "private"]):
@@ -114,8 +118,8 @@ def _classify_gallerydl_error(stderr: str) -> None:
             "Ce contenu d'image est privé ou nécessite une connexion sur la plateforme."
         )
 
-    if any(phrase in lower for phrase in ["404", "not found", "doesn't exist", "deleted"]):
-        raise ContentNotFoundError("L'image ou l'album demandé est introuvable ou a été supprimé.")
+    if any(phrase in lower for phrase in ["404", "not found", "doesn't exist", "deleted", "unavailable", "'unavailable'", "tombstone"]):
+        raise ContentNotFoundError("Ce contenu est indisponible, introuvable ou a été supprimé de la plateforme.")
 
     if "403" in lower:
         if any(w in lower for w in ["login", "private", "account"]):

@@ -61,3 +61,15 @@ def test_config_invalid_int(monkeypatch):
     monkeypatch.setenv("MAX_FILE_SIZE", "not_a_number")
     with pytest.raises(ConfigError, match="must be a valid integer"):
         AppConfig.load()
+
+
+def test_config_cookies_options(monkeypatch, tmp_path: Path):
+    cookies_path = tmp_path / "test_cookies.txt"
+    cookies_path.write_text("# Netscape HTTP Cookie File")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake_token_123")
+    monkeypatch.setenv("COOKIES_FILE", str(cookies_path))
+    monkeypatch.setenv("COOKIES_BROWSER", "chrome")
+
+    config = AppConfig.load()
+    assert config.cookies_file == cookies_path.resolve()
+    assert config.cookies_browser == "chrome"

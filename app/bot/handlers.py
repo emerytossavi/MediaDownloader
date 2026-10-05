@@ -281,24 +281,26 @@ class BotHandlers:
                 extractor=executed_tool.value if executed_tool else "inconnu",
             )
             await notifier.update(STATUS_CANCELLED, force=True, show_cancel=False)
-        except AuthenticationRequiredError:
-            task.mark_failed(ERR_AUTH_REQUIRED)
+        except AuthenticationRequiredError as exc:
+            msg = str(exc).strip() if str(exc).strip() else ERR_AUTH_REQUIRED
+            task.mark_failed(msg)
             await self.tracker.record_failure(
                 task=task,
-                reason="Contenu privé ou authentification requise sur la plateforme.",
+                reason=msg,
                 error_type="AuthenticationRequiredError",
                 extractor=executed_tool.value if executed_tool else "inconnu",
             )
-            await notifier.update(ERR_AUTH_REQUIRED, force=True, show_cancel=False)
-        except ContentNotFoundError:
-            task.mark_failed(ERR_CONTENT_NOT_FOUND)
+            await notifier.update(f"🔒 {msg}" if not msg.startswith("🔒") else msg, force=True, show_cancel=False)
+        except ContentNotFoundError as exc:
+            msg = str(exc).strip() if str(exc).strip() else ERR_CONTENT_NOT_FOUND
+            task.mark_failed(msg)
             await self.tracker.record_failure(
                 task=task,
-                reason="Contenu introuvable ou supprimé de la plateforme.",
+                reason=msg,
                 error_type="ContentNotFoundError",
                 extractor=executed_tool.value if executed_tool else "inconnu",
             )
-            await notifier.update(ERR_CONTENT_NOT_FOUND, force=True, show_cancel=False)
+            await notifier.update(f"🔍 {msg}" if not msg.startswith("🔍") else msg, force=True, show_cancel=False)
         except DownloadTimeoutError:
             task.mark_failed(ERR_TIMEOUT)
             await self.tracker.record_failure(

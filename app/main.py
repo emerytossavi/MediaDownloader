@@ -45,6 +45,7 @@ def main() -> None:
         gallerydl_bin=config.gallerydl_bin,
         ffmpeg_bin=config.ffmpeg_bin,
         cookies_file=config.cookies_file,
+        cookies_browser=config.cookies_browser,
     )
 
     # Tracker for tracking downloads by category (completed vs failed with reasons)

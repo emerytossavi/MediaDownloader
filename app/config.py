@@ -37,6 +37,7 @@ class AppConfig:
     ffmpeg_bin: Optional[str]
     history_file: Path = Path(DEFAULT_HISTORY_FILE)
     cookies_file: Optional[Path] = None
+    cookies_browser: Optional[str] = None
 
     @classmethod
     def load(cls, env_file: Optional[Path | str] = None) -> AppConfig:
@@ -103,6 +104,9 @@ class AppConfig:
         cookies_str = os.getenv("COOKIES_FILE")
         cookies_file = Path(cookies_str).resolve() if cookies_str and cookies_str.strip() else None
 
+        cookies_browser = os.getenv("COOKIES_BROWSER")
+        cookies_browser = cookies_browser.strip() if cookies_browser and cookies_browser.strip() else None
+
         return cls(
             telegram_bot_token=token,
             max_file_size=max_file_size,
@@ -116,6 +120,7 @@ class AppConfig:
             ffmpeg_bin=ffmpeg_bin,
             history_file=history_file,
             cookies_file=cookies_file,
+            cookies_browser=cookies_browser,
         )
 
     @staticmethod

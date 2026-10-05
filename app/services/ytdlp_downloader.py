@@ -39,6 +39,7 @@ async def download_with_ytdlp(
     bin_path: str = "yt-dlp",
     ffmpeg_bin: Optional[str] = None,
     cookies_file: Optional[Path] = None,
+    cookies_browser: Optional[str] = None,
 ) -> None:
     """Download video or audio media using yt-dlp via an isolated asynchronous subprocess."""
     max_size_mb = max(1, max_file_size // (1024 * 1024))
@@ -52,7 +53,18 @@ async def download_with_ytdlp(
         "--restrict-filenames",
         # Attempt to prioritize MP4/compatible streams under the limit
         "-f",
-        f"bestvideo[ext=mp4][filesize<={max_size_mb}M]+bestaudio[ext=m4a]/best[filesize<={max_size_mb}M]/bestvideo+bestaudio/best",
+        (
+            f"b[filesize<={max_size_mb}M]/b[filesize_approx<={max_size_mb}M]/"
+            f"hd[filesize<={max_size_mb}M]/hd/sd/"
+            f"bestvideo[ext=mp4][filesize<={max_size_mb}M]+bestaudio[ext=m4a]/"
+            f"bestvideo[filesize<={max_size_mb}M]+bestaudio/"
+            f"bestvideo[filesize_approx<={max_size_mb}M]+bestaudio/"
+            f"bestvideo[height<=720]+bestaudio/"
+            f"best[height<=720]/"
+            f"bestvideo[height<=480]+bestaudio/"
+            f"best[height<=480]/"
+            f"bestvideo+bestaudio/best"
+        ),
         "--max-filesize",
         f"{max_size_mb}M",
         "-o",
@@ -69,6 +81,8 @@ async def download_with_ytdlp(
 
     if cookies_file and Path(cookies_file).exists():
         cmd.extend(["--cookies", str(cookies_file)])
+    elif cookies_browser:
+        cmd.extend(["--cookies-from-browser", cookies_browser])
 
     # Add URL as the final positional argument
     cmd.append(task.url)
@@ -120,10 +134,52 @@ async def download_with_ytdlp(
         )
         _classify_ytdlp_error(stderr_text)
 
+    # Vérification anti-orphelin : si la vidéo a été avortée car > 50M mais que le flux audio a été téléchargé
+    all_output = (stdout_text + "\n" + stderr_text).lower()
+    video_exts = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".flv", ".ts"}
+    audio_exts = {".mp3", ".m4a", ".ogg", ".flac", ".wav", ".opus", ".aac"}
+
+    downloaded_files = list(target_dir.iterdir()) if target_dir.exists() else []
+    has_video = any(f.suffix.lower() in video_exts for f in downloaded_files)
+    audio_files = [f for f in downloaded_files if f.suffix.lower() in audio_exts]
+
+    if not has_video and audio_files and "file is larger than max-filesize" in all_output:
+        logger.warning(
+            f"[Task {task.task_id}] Le flux vidéo a dépassé {max_size_mb}M et a été ignoré par yt-dlp. "
+            f"Suppression du flux audio isolé."
+        )
+        for a in audio_files:
+            try:
+                a.unlink()
+            except OSError:
+                pass
+        raise ExtractorError("Le fichier vidéo dépasse la limite maximale autorisée (50 MiB) pour Telegram.")
+
 
 def _classify_ytdlp_error(stderr: str) -> None:
     """Analyze yt-dlp stderr output and raise descriptive exceptions."""
     lower = stderr.lower()
+
+    if (
+        "this content is unreachable. use --cookies" in lower
+        or "use --cookies for the authentication" in lower
+        or "[instagram:story]" in lower
+        or "instagram.com/stories" in lower
+    ):
+        raise AuthenticationRequiredError(
+            "Cette Story Instagram nécessite une session connectée (cookies manquants ou expirés). "
+            "Configurez COOKIES_FILE ou COOKIES_BROWSER pour télécharger les Stories."
+        )
+
+    if (
+        "facebook.com/login" in lower
+        or "facebook.com/stories" in lower
+        or ("facebook.com" in lower and "login.php" in lower)
+    ):
+        raise AuthenticationRequiredError(
+            "Cette Story ou publication Facebook nécessite un compte connecté. "
+            "Configurez COOKIES_FILE ou COOKIES_BROWSER pour y accéder."
+        )
 
     if any(
         phrase in lower
@@ -141,13 +197,12 @@ def _classify_ytdlp_error(stderr: str) -> None:
         )
 
     if (
-        "this content is unreachable. use --cookies" in lower
-        or "use --cookies for the authentication" in lower
-        or "[instagram:story]" in lower
+        "no video could be found in this tweet" in lower
+        or "no video formats found" in lower
     ):
-        raise AuthenticationRequiredError(
-            "Les Stories Instagram nécessitent un compte connecté. "
-            "Configurez un fichier de cookies (COOKIES_FILE) pour y accéder."
+        raise ContentNotFoundError(
+            "Aucun média vidéo trouvé dans cette publication. "
+            "Il s'agit potentiellement d'un tweet textuel ou d'images."
         )
 
     if any(
@@ -159,9 +214,11 @@ def _classify_ytdlp_error(stderr: str) -> None:
             "404",
             "deleted",
             "has been removed",
+            "unavailable",
+            "tombstone",
         ]
     ):
-        raise ContentNotFoundError("Le contenu demandé est introuvable ou a été supprimé.")
+        raise ContentNotFoundError("Le contenu demandé est indisponible, introuvable ou a été supprimé.")
 
     if "file is larger than max-filesize" in lower:
         raise ExtractorError(
@@ -181,3 +238,35 @@ def _classify_ytdlp_error(stderr: str) -> None:
     lines = [line.strip() for line in stderr.splitlines() if "ERROR:" in line]
     error_detail = lines[0] if lines else "Échec de l'extraction multimédia."
     raise ExtractorError(error_detail)
+
+
+class YtDlpDownloader:
+    """Downloader implementation wrapping yt-dlp."""
+
+    def __init__(
+        self,
+        max_file_size: int,
+        download_timeout: int,
+        bin_path: str = "yt-dlp",
+        ffmpeg_bin: Optional[str] = None,
+        cookies_file: Optional[Path] = None,
+        cookies_browser: Optional[str] = None,
+    ) -> None:
+        self.max_file_size = max_file_size
+        self.download_timeout = download_timeout
+        self.bin_path = bin_path
+        self.ffmpeg_bin = ffmpeg_bin
+        self.cookies_file = cookies_file
+        self.cookies_browser = cookies_browser
+
+    async def download(self, task: DownloadTask, target_dir: Path) -> None:
+        await download_with_ytdlp(
+            task=task,
+            target_dir=target_dir,
+            max_file_size=self.max_file_size,
+            timeout=self.download_timeout,
+            bin_path=self.bin_path,
+            ffmpeg_bin=self.ffmpeg_bin,
+            cookies_file=self.cookies_file,
+            cookies_browser=self.cookies_browser,
+        )
