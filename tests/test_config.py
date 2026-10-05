@@ -7,6 +7,7 @@ from app.config import AppConfig, ConfigError
 
 
 def test_config_load_valid(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr("app.config.load_dotenv", lambda **kwargs: None)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456789:ABCdefGhIjkLmNoPqRsTuVwXyZ12345678")
     monkeypatch.setenv("MAX_FILE_SIZE", "10485760")
     monkeypatch.setenv("MAX_CONCURRENT_DOWNLOADS", "3")
@@ -14,6 +15,7 @@ def test_config_load_valid(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("DOWNLOAD_TIMEOUT", "120")
     monkeypatch.setenv("TEMP_DIR", str(tmp_path / "custom_temp"))
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    monkeypatch.setenv("DOWNLOAD_HISTORY_FILE", str(tmp_path / "custom_history.json"))
 
     config = AppConfig.load()
     assert config.telegram_bot_token == "123456789:ABCdefGhIjkLmNoPqRsTuVwXyZ12345678"
@@ -23,9 +25,11 @@ def test_config_load_valid(monkeypatch, tmp_path: Path):
     assert config.download_timeout == 120
     assert config.temp_dir == (tmp_path / "custom_temp").resolve()
     assert config.log_level == "DEBUG"
+    assert config.history_file == (tmp_path / "custom_history.json")
 
 
 def test_config_missing_token(monkeypatch):
+    monkeypatch.setattr("app.config.load_dotenv", lambda **kwargs: None)
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     with pytest.raises(ConfigError, match="TELEGRAM_BOT_TOKEN is mandatory"):
         AppConfig.load()

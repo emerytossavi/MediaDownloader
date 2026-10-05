@@ -46,6 +46,7 @@ from app.security.url_validator import (
     extract_url_from_text,
     validate_url_safety,
 )
+from app.services.download_tracker import DownloadTracker
 from app.services.media_inspector import MediaInspectionResult
 from app.services.router import ExtractorRouter
 from app.services.task_manager import DownloadTask, TaskLimitExceededError, TaskManager
@@ -74,10 +75,12 @@ class BotHandlers:
         config: AppConfig,
         task_manager: TaskManager,
         router: ExtractorRouter,
+        tracker: Optional[DownloadTracker] = None,
     ) -> None:
         self.config = config
         self.task_manager = task_manager
         self.router = router
+        self.tracker = tracker or DownloadTracker(config.history_file)
 
     def register(self, application: Application) -> None:
         """Register all dispatch handlers on the python-telegram-bot application."""
@@ -144,10 +147,24 @@ class BotHandlers:
             validated_url = await validate_url_safety(raw_url, resolve_dns=True)
         except SSRFSecurityError as exc:
             logger.warning(f"SSRF blocked for user {user_id}: {exc}")
+            await self.tracker.record_failure(
+                url=raw_url,
+                user_id=user_id,
+                reason=f"Sécurité : URL bloquée (SSRF) - {exc}",
+                error_type="SSRFSecurityError",
+                extractor="validator",
+            )
             await status_msg.edit_text(ERR_SSRF_BLOCKED)
             return
         except URLValidationError as exc:
             logger.info(f"Invalid URL from user {user_id}: {exc}")
+            await self.tracker.record_failure(
+                url=raw_url,
+                user_id=user_id,
+                reason=f"URL invalide : {exc}",
+                error_type="URLValidationError",
+                extractor="validator",
+            )
             await status_msg.edit_text(ERR_INVALID_URL.format(detail=str(exc)))
             return
 
@@ -159,6 +176,13 @@ class BotHandlers:
                 url=validated_url,
             )
         except TaskLimitExceededError:
+            await self.tracker.record_failure(
+                url=validated_url,
+                user_id=user_id,
+                reason="Limite de tâches simultanées dépassée pour cet utilisateur.",
+                error_type="TaskLimitExceededError",
+                extractor="task_manager",
+            )
             await status_msg.edit_text(ERR_ALREADY_RUNNING)
             return
 
@@ -181,11 +205,18 @@ class BotHandlers:
     ) -> None:
         """Isolated download, inspection, upload, and cleanup pipeline for a task."""
         job_dir = None
+        executed_tool = None
         max_size_mb = self.config.max_file_size // (1024 * 1024)
 
         try:
             if not check_disk_space(self.config.temp_dir):
                 task.mark_failed(ERR_DISK_FULL)
+                await self.tracker.record_failure(
+                    task=task,
+                    reason="Espace disque temporaire insuffisant.",
+                    error_type="DiskFullError",
+                    extractor="system",
+                )
                 await notifier.update(ERR_DISK_FULL, force=True, show_cancel=False)
                 return
 
@@ -211,6 +242,12 @@ class BotHandlers:
 
                 if not inspection.has_valid_media and not inspection.has_oversized_media:
                     task.mark_failed(ERR_NO_MEDIA)
+                    await self.tracker.record_failure(
+                        task=task,
+                        reason="Aucun média téléchargeable n'a été trouvé à cette adresse.",
+                        error_type="NoMediaError",
+                        extractor=executed_tool.value if executed_tool else "inconnu",
+                    )
                     await notifier.update(ERR_NO_MEDIA, force=True, show_cancel=False)
                     return
 
@@ -227,27 +264,68 @@ class BotHandlers:
                     await context.bot.send_message(chat_id=task.chat_id, text=warning_text, parse_mode="Markdown")
 
                 task.mark_completed()
+                await self.tracker.record_success(
+                    task=task,
+                    extractor=executed_tool.value if executed_tool else "inconnu",
+                    files_count=sent_count,
+                )
                 summary = format_completion_summary(sent_count, len(inspection.oversized_items))
                 await notifier.update(summary, force=True, show_cancel=False)
 
         except DownloadCancelledError:
             task.mark_cancelled()
+            await self.tracker.record_failure(
+                task=task,
+                reason="Téléchargement annulé par l'utilisateur.",
+                error_type="DownloadCancelledError",
+                extractor=executed_tool.value if executed_tool else "inconnu",
+            )
             await notifier.update(STATUS_CANCELLED, force=True, show_cancel=False)
         except AuthenticationRequiredError:
             task.mark_failed(ERR_AUTH_REQUIRED)
+            await self.tracker.record_failure(
+                task=task,
+                reason="Contenu privé ou authentification requise sur la plateforme.",
+                error_type="AuthenticationRequiredError",
+                extractor=executed_tool.value if executed_tool else "inconnu",
+            )
             await notifier.update(ERR_AUTH_REQUIRED, force=True, show_cancel=False)
         except ContentNotFoundError:
             task.mark_failed(ERR_CONTENT_NOT_FOUND)
+            await self.tracker.record_failure(
+                task=task,
+                reason="Contenu introuvable ou supprimé de la plateforme.",
+                error_type="ContentNotFoundError",
+                extractor=executed_tool.value if executed_tool else "inconnu",
+            )
             await notifier.update(ERR_CONTENT_NOT_FOUND, force=True, show_cancel=False)
         except DownloadTimeoutError:
             task.mark_failed(ERR_TIMEOUT)
+            await self.tracker.record_failure(
+                task=task,
+                reason=f"Délai d'attente dépassé ({self.config.download_timeout}s).",
+                error_type="DownloadTimeoutError",
+                extractor=executed_tool.value if executed_tool else "inconnu",
+            )
             await notifier.update(ERR_TIMEOUT, force=True, show_cancel=False)
         except ExtractorError as exc:
             task.mark_failed(str(exc))
+            await self.tracker.record_failure(
+                task=task,
+                reason=str(exc),
+                error_type="ExtractorError",
+                extractor=executed_tool.value if executed_tool else "inconnu",
+            )
             await notifier.update(f"⚠️ {str(exc)}", force=True, show_cancel=False)
         except Exception as exc:
             logger.exception(f"[Task {task.task_id}] Unhandled error: {exc}")
             task.mark_failed(str(exc))
+            await self.tracker.record_failure(
+                task=task,
+                reason=str(exc),
+                error_type=exc.__class__.__name__,
+                extractor=executed_tool.value if executed_tool else "inconnu",
+            )
             await notifier.update(ERR_UNEXPECTED, force=True, show_cancel=False)
         finally:
             cleanup_job_directory(job_dir)

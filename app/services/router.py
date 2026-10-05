@@ -6,8 +6,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional, Tuple
 from app.services.gallerydl_downloader import download_with_gallerydl
+from app.services.instagram_photo_downloader import (
+    download_instagram_photos,
+    is_instagram_url,
+)
 from app.services.media_inspector import MediaInspectionResult, inspect_directory
 from app.services.task_manager import DownloadTask
+from app.services.tiktok_photo_downloader import download_tiktok_photos, is_tiktok_url
 from app.services.ytdlp_downloader import download_with_ytdlp, ExtractorError
 from app.utils.logging import get_logger
 
@@ -30,12 +35,14 @@ class ExtractorRouter:
         ytdlp_bin: str = "yt-dlp",
         gallerydl_bin: str = "gallery-dl",
         ffmpeg_bin: Optional[str] = None,
+        cookies_file: Optional[Path] = None,
     ) -> None:
         self.max_file_size = max_file_size
         self.download_timeout = download_timeout
         self.ytdlp_bin = ytdlp_bin
         self.gallerydl_bin = gallerydl_bin
         self.ffmpeg_bin = ffmpeg_bin
+        self.cookies_file = cookies_file
 
     def detect_primary_extractor(self, url: str) -> ExtractorType:
         """Inspect URL using native extractor matching in gallery-dl and yt-dlp."""
@@ -68,11 +75,15 @@ class ExtractorRouter:
         if ytdlp_supported and not gallery_supported:
             return ExtractorType.YTDLP
 
-        # 2. If both match (e.g. Instagram, Reddit, Twitter), prioritize yt-dlp for video or gallery-dl based on URL
+        # 2. If both match (e.g. Instagram, Reddit, Twitter, TikTok, Pinterest), prioritize based on URL hints:
         url_lower = url.lower()
         if any(hint in url_lower for hint in ["/reel/", "/video/", "watch?v=", "/shorts/", "/v/"]):
             return ExtractorType.YTDLP
-        if any(hint in url_lower for hint in ["/p/", "/album/", "/gallery/", "/art/"]):
+        if any(hint in url_lower for hint in ["/p/", "/album/", "/gallery/", "/art/", "/photo/", "/photos/", "/image/", "/images/"]):
+            return ExtractorType.GALLERYDL
+
+        # Pinterest est principalement une plateforme d'images (gallery-dl gère images et vidéos nativement)
+        if ("pinterest." in url_lower or "pin.it" in url_lower) and gallery_supported:
             return ExtractorType.GALLERYDL
 
         # Default preference if both match: yt-dlp first (it extracts both video and audio)
@@ -103,6 +114,22 @@ class ExtractorRouter:
             else [ExtractorType.GALLERYDL, ExtractorType.YTDLP]
         )
 
+        # Tentative d'extraction directe des diaporamas / photos TikTok si l'URL est de TikTok
+        if is_tiktok_url(task.url):
+            try:
+                extracted = await download_tiktok_photos(
+                    task=task,
+                    target_dir=target_dir,
+                    timeout=self.download_timeout,
+                )
+                if extracted:
+                    inspection = inspect_directory(target_dir, max_file_size=self.max_file_size)
+                    if inspection.has_valid_media or inspection.has_oversized_media:
+                        logger.info(f"[Task {task.task_id}] Diaporama photo TikTok extrait avec succès.")
+                        return ExtractorType.GALLERYDL, inspection
+            except Exception as exc:
+                logger.debug(f"[Task {task.task_id}] L'extracteur TikTok photo a échoué: {exc}")
+
         last_error: Optional[Exception] = None
         executed_tool: ExtractorType = primary
 
@@ -122,6 +149,7 @@ class ExtractorRouter:
                         timeout=self.download_timeout,
                         bin_path=self.ytdlp_bin,
                         ffmpeg_bin=self.ffmpeg_bin,
+                        cookies_file=self.cookies_file,
                     )
                 else:
                     await download_with_gallerydl(
@@ -129,6 +157,7 @@ class ExtractorRouter:
                         target_dir=target_dir,
                         timeout=self.download_timeout,
                         bin_path=self.gallerydl_bin,
+                        cookies_file=self.cookies_file,
                     )
 
                 # Inspect directory to see if any media was produced
@@ -141,6 +170,23 @@ class ExtractorRouter:
             except Exception as exc:
                 logger.warning(f"[Task {task.task_id}] {tool.value} failed: {exc}")
                 last_error = exc
+
+        # Tentative d'extraction spécialisée des photos/carrousels Instagram si aucun média n'a été produit
+        if is_instagram_url(task.url) and not task.cancel_event.is_set():
+            try:
+                ig_photos = await download_instagram_photos(
+                    task=task,
+                    target_dir=target_dir,
+                    timeout=self.download_timeout,
+                    cookies_file=self.cookies_file,
+                )
+                if ig_photos:
+                    result = inspect_directory(target_dir, max_file_size=self.max_file_size)
+                    if result.has_valid_media or result.has_oversized_media:
+                        logger.info(f"[Task {task.task_id}] Carrousel photo Instagram extrait avec succès.")
+                        return ExtractorType.GALLERYDL, result
+            except Exception as exc:
+                logger.debug(f"[Task {task.task_id}] Échec extracteur Instagram photo: {exc}")
 
         # If both attempts failed or produced no files:
         final_inspection = inspect_directory(target_dir, max_file_size=self.max_file_size)

@@ -38,6 +38,7 @@ async def download_with_ytdlp(
     timeout: int,
     bin_path: str = "yt-dlp",
     ffmpeg_bin: Optional[str] = None,
+    cookies_file: Optional[Path] = None,
 ) -> None:
     """Download video or audio media using yt-dlp via an isolated asynchronous subprocess."""
     max_size_mb = max(1, max_file_size // (1024 * 1024))
@@ -65,6 +66,9 @@ async def download_with_ytdlp(
 
     if ffmpeg_bin:
         cmd.extend(["--ffmpeg-location", ffmpeg_bin])
+
+    if cookies_file and Path(cookies_file).exists():
+        cmd.extend(["--cookies", str(cookies_file)])
 
     # Add URL as the final positional argument
     cmd.append(task.url)
@@ -136,6 +140,16 @@ def _classify_ytdlp_error(stderr: str) -> None:
             "Ce contenu est privé ou nécessite une authentification."
         )
 
+    if (
+        "this content is unreachable. use --cookies" in lower
+        or "use --cookies for the authentication" in lower
+        or "[instagram:story]" in lower
+    ):
+        raise AuthenticationRequiredError(
+            "Les Stories Instagram nécessitent un compte connecté. "
+            "Configurez un fichier de cookies (COOKIES_FILE) pour y accéder."
+        )
+
     if any(
         phrase in lower
         for phrase in [
@@ -152,6 +166,15 @@ def _classify_ytdlp_error(stderr: str) -> None:
     if "file is larger than max-filesize" in lower:
         raise ExtractorError(
             "Le fichier multimédia dépasse la limite maximale autorisée (50 MiB) et a été ignoré."
+        )
+
+    if (
+        "unexpected response from webpage request" in lower
+        or "the extractor is attempting impersonation" in lower
+    ):
+        raise ExtractorError(
+            "La plateforme a restreint l'accès (protection anti-bot / impersonation requise). "
+            "Veuillez réessayer ultérieurement."
         )
 
     # Generic extractor error with first relevant line

@@ -7,6 +7,7 @@ from telegram.ext import ApplicationBuilder
 
 from app.bot.handlers import BotHandlers
 from app.config import AppConfig, ConfigError
+from app.services.download_tracker import DownloadTracker
 from app.services.router import ExtractorRouter
 from app.services.task_manager import TaskManager
 from app.utils.filesystem import cleanup_abandoned_jobs, ensure_directory
@@ -43,7 +44,11 @@ def main() -> None:
         ytdlp_bin=config.ytdlp_bin,
         gallerydl_bin=config.gallerydl_bin,
         ffmpeg_bin=config.ffmpeg_bin,
+        cookies_file=config.cookies_file,
     )
+
+    # Tracker for tracking downloads by category (completed vs failed with reasons)
+    tracker = DownloadTracker(file_path=config.history_file)
 
     # Build python-telegram-bot application
     app = ApplicationBuilder().token(config.telegram_bot_token).build()
@@ -52,6 +57,7 @@ def main() -> None:
         config=config,
         task_manager=task_manager,
         router=router,
+        tracker=tracker,
     )
     handlers.register(app)
 

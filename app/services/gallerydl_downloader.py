@@ -23,6 +23,7 @@ async def download_with_gallerydl(
     target_dir: Path,
     timeout: int,
     bin_path: str = "gallery-dl",
+    cookies_file: Optional[Path] = None,
 ) -> None:
     """Download images/galleries using gallery-dl via an isolated asynchronous subprocess."""
     cmd: List[str] = [
@@ -34,10 +35,14 @@ async def download_with_gallerydl(
         "--no-part",
         "--retries",
         "3",
-        "--timeout",
+        "--http-timeout",
         "30",
-        task.url,
     ]
+
+    if cookies_file and Path(cookies_file).exists():
+        cmd.extend(["--cookies", str(cookies_file)])
+
+    cmd.append(task.url)
 
     logger.info(f"[Task {task.task_id}] Executing gallery-dl command: {' '.join(cmd[:4])} ...")
 
@@ -90,7 +95,21 @@ def _classify_gallerydl_error(stderr: str) -> None:
     """Analyze gallery-dl error output and raise specialized exceptions."""
     lower = stderr.lower()
 
-    if any(phrase in lower for phrase in ["401", "403", "unauthorized", "login", "private"]):
+    if "solving javascript challenge" in lower or "challenge" in lower:
+        raise ExtractorError("La plateforme a bloqué la requête (protection anti-bot/Cloudflare).")
+
+    if "http redirect to login page" in lower or "/accounts/login" in lower:
+        raise AuthenticationRequiredError(
+            "Instagram exige une connexion pour accéder à ce contenu. "
+            "Configurez un fichier de cookies (COOKIES_FILE) pour débloquer cet accès."
+        )
+
+    if "requested user could not be found" in lower or "user could not be found" in lower:
+        raise AuthenticationRequiredError(
+            "Ce contenu (Story ou compte restreint) nécessite un compte connecté sur Instagram."
+        )
+
+    if any(phrase in lower for phrase in ["401", "unauthorized", "login", "private"]):
         raise AuthenticationRequiredError(
             "Ce contenu d'image est privé ou nécessite une connexion sur la plateforme."
         )
@@ -98,6 +117,17 @@ def _classify_gallerydl_error(stderr: str) -> None:
     if any(phrase in lower for phrase in ["404", "not found", "doesn't exist", "deleted"]):
         raise ContentNotFoundError("L'image ou l'album demandé est introuvable ou a été supprimé.")
 
-    lines = [line.strip() for line in stderr.splitlines() if "[error]" in line.lower()]
+    if "403" in lower:
+        if any(w in lower for w in ["login", "private", "account"]):
+            raise AuthenticationRequiredError(
+                "Ce contenu d'image est privé ou nécessite une connexion sur la plateforme."
+            )
+        raise ExtractorError("Accès refusé par la plateforme (protection anti-bot ou restriction).")
+
+    lines = [
+        line.strip()
+        for line in stderr.splitlines()
+        if "[error]" in line.lower() or "error:" in line.lower()
+    ]
     detail = lines[0] if lines else "Échec de l'extraction d'images."
     raise ExtractorError(detail)

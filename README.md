@@ -65,6 +65,7 @@ MediaDownloaderBot/
 │   │   ├── router.py            # Routeur d'extracteurs yt-dlp / gallery-dl avec fallback
 │   │   ├── ytdlp_downloader.py  # Pilotage asynchrone sécurisé de yt-dlp
 │   │   ├── gallerydl_downloader.py # Pilotage asynchrone sécurisé de gallery-dl
+│   │   ├── download_tracker.py  # Sauvegarde et suivi catégorisé (aboutis / échecs avec raison)
 │   │   └── media_inspector.py   # Inspection, typage et filtrage de taille (< 50 MiB)
 │   ├── security/
 │   │   ├── __init__.py

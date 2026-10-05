@@ -15,6 +15,7 @@ DEFAULT_CONCURRENT_DOWNLOADS: int = 2
 DEFAULT_CONCURRENT_PER_USER: int = 1
 DEFAULT_DOWNLOAD_TIMEOUT: int = 300
 DEFAULT_TEMP_DIR: str = "/tmp/telegram-downloader"
+DEFAULT_HISTORY_FILE: str = "downloads_history.json"
 DEFAULT_LOG_LEVEL: str = "INFO"
 
 
@@ -34,6 +35,8 @@ class AppConfig:
     ytdlp_bin: str
     gallerydl_bin: str
     ffmpeg_bin: Optional[str]
+    history_file: Path = Path(DEFAULT_HISTORY_FILE)
+    cookies_file: Optional[Path] = None
 
     @classmethod
     def load(cls, env_file: Optional[Path | str] = None) -> AppConfig:
@@ -94,6 +97,12 @@ class AppConfig:
         else:
             ffmpeg_bin = shutil.which("ffmpeg")
 
+        history_file_str = os.getenv("DOWNLOAD_HISTORY_FILE", DEFAULT_HISTORY_FILE).strip()
+        history_file = Path(history_file_str)
+
+        cookies_str = os.getenv("COOKIES_FILE")
+        cookies_file = Path(cookies_str).resolve() if cookies_str and cookies_str.strip() else None
+
         return cls(
             telegram_bot_token=token,
             max_file_size=max_file_size,
@@ -105,6 +114,8 @@ class AppConfig:
             ytdlp_bin=ytdlp_bin,
             gallerydl_bin=gallerydl_bin,
             ffmpeg_bin=ffmpeg_bin,
+            history_file=history_file,
+            cookies_file=cookies_file,
         )
 
     @staticmethod
