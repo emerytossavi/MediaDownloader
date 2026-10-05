@@ -1,0 +1,21 @@
+services:
+  media-downloader-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: media_downloader_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Named volume for temporary storage or host tmpfs
+      - temp-media-data:/tmp/telegram-downloader
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 1024m
+    cpus: 1.5
+
+volumes:
+  temp-media-data:

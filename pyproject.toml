@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "media-downloader-bot"
+version = "1.0.0"
+description = "Production-grade Telegram Media Downloader Bot using yt-dlp, gallery-dl and asyncio."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "python-telegram-bot[rate-limiter]>=21.0,<22.0",
+    "yt-dlp>=2024.8.6",
+    "gallery-dl>=1.27.0",
+    "python-dotenv>=1.0.1",
+    "aiohttp>=3.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra -q --asyncio-mode=auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
