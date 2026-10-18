@@ -14,6 +14,7 @@ def test_detect_url_category():
     assert detect_url_category("https://www.instagram.com/reel/C12345/") == "instagram"
     assert detect_url_category("https://youtu.be/dQw4w9WgXcQ") == "youtube"
     assert detect_url_category("https://www.youtube.com/watch?v=dQw4w9WgXcQ") == "youtube"
+    assert detect_url_category("https://rr3---sn-4g5lznlr.googlevideo.com/videoplayback?expire=123") == "youtube"
     assert detect_url_category("https://x.com/user/status/12345") == "twitter_x"
     assert detect_url_category("https://twitter.com/user/status/12345") == "twitter_x"
     assert detect_url_category("https://www.reddit.com/r/funny/comments/123") == "reddit"

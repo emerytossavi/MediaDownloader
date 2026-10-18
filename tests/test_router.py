@@ -15,6 +15,14 @@ def test_router_detection_video_platforms():
     assert router.detect_primary_extractor("https://www.youtube.com/watch?v=dQw4w9WgXcQ") == ExtractorType.YTDLP
     assert router.detect_primary_extractor("https://vimeo.com/123456") == ExtractorType.YTDLP
     assert router.detect_extractors("https://youtu.be/56lkofpjOAs") == [ExtractorType.YTDLP]
+    assert router.detect_extractors("https://rr3---sn-4g5lznlr.googlevideo.com/videoplayback?expire=123") == [ExtractorType.YTDLP]
+
+
+def test_is_googlevideo_url():
+    from app.services.router import is_googlevideo_url
+    assert is_googlevideo_url("https://rr3---sn-4g5lznlr.googlevideo.com/videoplayback?expire=123") is True
+    assert is_googlevideo_url("https://googlevideo.com/videoplayback") is True
+    assert is_googlevideo_url("https://youtube.com/watch?v=123") is False
 
 
 @pytest.mark.asyncio
@@ -33,6 +41,46 @@ async def test_router_youtube_never_calls_gallerydl(tmp_path: Path):
         with pytest.raises(ExtractorError) as exc_info:
             await router.execute_download(task, tmp_path)
         assert "dépasse la limite maximale" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_router_googlevideo_never_calls_gallerydl(tmp_path: Path):
+    router = ExtractorRouter(max_file_size=50 * 1024 * 1024, download_timeout=60)
+    # Expiration in the future
+    task = DownloadTask(
+        task_id="t_gv",
+        user_id=1,
+        chat_id=1,
+        url="https://rr3---sn-4g5lznlr.googlevideo.com/videoplayback?expire=9999999999",
+    )
+
+    async def fake_ytdlp(*args, **kwargs):
+        raise ExtractorError("HTTP Error 403: Forbidden")
+
+    async def fake_gallerydl(*args, **kwargs):
+        pytest.fail("gallery-dl should never be called on googlevideo URLs")
+
+    with patch("app.services.router.download_with_ytdlp", side_effect=fake_ytdlp), \
+         patch("app.services.router.download_with_gallerydl", side_effect=fake_gallerydl):
+        with pytest.raises(ExtractorError) as exc_info:
+            await router.execute_download(task, tmp_path)
+        assert "HTTP Error 403: Forbidden" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_router_expired_googlevideo_fast_fail(tmp_path: Path):
+    router = ExtractorRouter(max_file_size=50 * 1024 * 1024, download_timeout=60)
+    # Expiration in the past (1000000000 = year 2001)
+    task = DownloadTask(
+        task_id="t_gv_exp",
+        user_id=1,
+        chat_id=1,
+        url="https://rr3---sn-4g5lznlr.googlevideo.com/videoplayback?expire=1000000000",
+    )
+
+    with pytest.raises(ExtractorError) as exc_info:
+        await router.execute_download(task, tmp_path)
+    assert "Google Video a expiré" in str(exc_info.value)
 
 
 

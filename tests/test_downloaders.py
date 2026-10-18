@@ -38,6 +38,14 @@ def test_classify_ytdlp_errors():
         _classify_ytdlp_error("ERROR: [TikTok] Unexpected response from webpage request")
     assert "anti-bot" in str(exc_info.value).lower()
 
+    with pytest.raises(ExtractorError) as exc_info:
+        _classify_ytdlp_error(
+            "ERROR: [generic] videoplayback: HTTP Error 403: Forbidden",
+            url="https://rr3---sn-4g5lznlr.googlevideo.com/videoplayback?expire=123",
+        )
+    assert "Google Video" in str(exc_info.value)
+    assert "YouTube" in str(exc_info.value)
+
 
 @pytest.mark.asyncio
 async def test_gallerydl_command_args(tmp_path: Path):
@@ -165,6 +173,63 @@ def test_is_instagram_url():
     assert is_instagram_url("https://www.instagram.com/p/DeDclIvDWAD/") is True
     assert is_instagram_url("https://instagr.am/reel/123") is True
     assert is_instagram_url("https://vt.tiktok.com/123") is False
+
+
+@pytest.mark.asyncio
+async def test_download_instagram_photos_success(tmp_path: Path):
+    import json
+    from unittest.mock import MagicMock
+    from app.services.instagram_photo_downloader import download_instagram_photos
+
+    task = DownloadTask(
+        task_id="test-ig",
+        user_id=123,
+        chat_id=123,
+        url="https://www.instagram.com/p/DeDclIvDWAD/",
+    )
+
+    metadata_line1 = json.dumps({"id": "photo_1", "thumbnail": "https://example.com/pic1.jpg"})
+    metadata_line2 = json.dumps({"id": "photo_2", "thumbnails": [{"url": "https://example.com/pic2.jpg"}]})
+    fake_stdout = f"{metadata_line1}\n{metadata_line2}\n".encode()
+
+    proc = AsyncMock()
+    proc.communicate.return_value = (fake_stdout, b"")
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.content = b"fake_jpeg_data"
+
+    mock_sess = MagicMock()
+    mock_sess.get.return_value = mock_resp
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc), \
+         patch("curl_cffi.requests.Session", return_value=mock_sess):
+        result = await download_instagram_photos(task, tmp_path, timeout=10)
+
+    assert result is True
+    jpg_files = list(tmp_path.glob("*.jpg"))
+    assert len(jpg_files) == 2
+
+
+@pytest.mark.asyncio
+async def test_download_instagram_photos_empty_metadata_returns_false(tmp_path: Path):
+    from app.services.instagram_photo_downloader import download_instagram_photos
+
+    task = DownloadTask(
+        task_id="test-ig-empty",
+        user_id=123,
+        chat_id=123,
+        url="https://www.instagram.com/p/EmptyPost/",
+    )
+
+    proc = AsyncMock()
+    proc.communicate.return_value = (b"", b"")
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await download_instagram_photos(task, tmp_path, timeout=10)
+
+    assert result is False
+
 
 
 def test_is_facebook_url():
