@@ -44,6 +44,18 @@ class ExtractorType(str, Enum):
     UNKNOWN = "unknown"
 
 
+def is_googlevideo_url(url: str) -> bool:
+    """Vérifie si l'URL pointe vers le CDN de flux vidéo Google/YouTube."""
+    if not url:
+        return False
+    try:
+        from urllib.parse import urlparse
+        domain = urlparse(url).netloc.lower().split(":")[0]
+        return domain == "googlevideo.com" or domain.endswith(".googlevideo.com")
+    except Exception:
+        return False
+
+
 class ExtractorRouter:
     """Intelligently detects suitable extraction engine and manages download with fallback."""
 
@@ -67,6 +79,10 @@ class ExtractorRouter:
 
     def detect_extractors(self, url: str) -> List[ExtractorType]:
         """Inspect URL using native extractor matching in gallery-dl and yt-dlp and return valid engines."""
+        # Les flux Google Video (CDN YouTube) sont exclusivement vidéo/audio et ne doivent jamais être confiés à gallery-dl
+        if is_googlevideo_url(url):
+            return [ExtractorType.YTDLP]
+
         gallery_supported = False
         try:
             import gallery_dl.extractor  # type: ignore
@@ -134,6 +150,24 @@ class ExtractorRouter:
             if resolved_tt != task.url:
                 logger.info(f"[Task {task.task_id}] URL TikTok résolue: {task.url} -> {resolved_tt}")
                 task.url = resolved_tt
+
+        # Détection immédiate des flux Google Video expirés
+        if is_googlevideo_url(task.url):
+            import time
+            from urllib.parse import parse_qs, urlparse
+            try:
+                parsed = urlparse(task.url)
+                qs = parse_qs(parsed.query)
+                expire = qs.get("expire", [None])[0]
+                if expire and float(expire) < time.time():
+                    raise ExtractorError(
+                        "Ce lien de flux Google Video a expiré. "
+                        "Veuillez envoyer le lien YouTube standard de la vidéo (ex: https://www.youtube.com/watch?v=... ou https://youtu.be/...) à la place."
+                    )
+            except ExtractorError:
+                raise
+            except Exception:
+                pass
 
         sequence = self.detect_extractors(task.url)
         primary = sequence[0]

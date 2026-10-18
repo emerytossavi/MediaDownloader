@@ -41,7 +41,7 @@ def detect_url_category(url: str) -> str:
         return "tiktok"
     if _matches_domain(domain, ["instagram.com", "instagr.am"]):
         return "instagram"
-    if _matches_domain(domain, ["youtube.com", "youtu.be"]):
+    if _matches_domain(domain, ["youtube.com", "youtu.be", "googlevideo.com"]):
         return "youtube"
     if _matches_domain(domain, ["twitter.com", "x.com", "t.co"]):
         return "twitter_x"

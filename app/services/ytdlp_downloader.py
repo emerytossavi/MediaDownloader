@@ -144,7 +144,7 @@ async def download_with_ytdlp(
         logger.warning(
             f"[Task {task.task_id}] yt-dlp failed (code {process.returncode}): {stderr_text[:500]}"
         )
-        _classify_ytdlp_error(stderr_text)
+        _classify_ytdlp_error(stderr_text, task.url)
 
     # Vérification anti-orphelin : si la vidéo a été avortée car > 50M mais que le flux audio a été téléchargé
     all_output = (stdout_text + "\n" + stderr_text).lower()
@@ -169,13 +169,20 @@ async def download_with_ytdlp(
 
     if not downloaded_files:
         if process.returncode != 0:
-            _classify_ytdlp_error(stderr_text)
+            _classify_ytdlp_error(stderr_text, task.url)
         raise ContentNotFoundError("Aucun média vidéo téléchargeable trouvé à cette adresse.")
 
 
-def _classify_ytdlp_error(stderr: str) -> None:
+def _classify_ytdlp_error(stderr: str, url: str = "") -> None:
     """Analyze yt-dlp stderr output and raise descriptive exceptions."""
     lower = stderr.lower()
+    url_lower = url.lower()
+
+    if "googlevideo.com" in url_lower or "googlevideo.com" in lower:
+        raise ExtractorError(
+            "Ce lien est un flux technique temporaire YouTube (Google Video) protégé par IP et inaccessible hors de votre navigateur. "
+            "Veuillez envoyer le lien YouTube standard de la vidéo (ex: https://www.youtube.com/watch?v=... ou https://youtu.be/...) à la place."
+        )
 
     if (
         "this content is unreachable. use --cookies" in lower
