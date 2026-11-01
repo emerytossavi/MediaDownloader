@@ -274,6 +274,27 @@ def _classify_ytdlp_error(stderr: str, url: str = "") -> None:
             "Veuillez envoyer le lien YouTube standard de la vidéo (ex: https://www.youtube.com/watch?v=... ou https://youtu.be/...) à la place."
         )
 
+    is_fb = (
+        "facebook.com" in url_lower
+        or "fb.watch" in url_lower
+        or "fb.com" in url_lower
+        or "[facebook]" in lower
+    )
+
+    if is_fb and (
+        "facebook.com/login" in lower
+        or "facebook.com/stories" in lower
+        or "login.php" in lower
+        or "only available for registered users" in lower
+        or "use --cookies" in lower
+        or "requires authentication" in lower
+        or "cannot parse data" in lower
+    ):
+        raise AuthenticationRequiredError(
+            "Cette vidéo ou publication Facebook nécessite un compte connecté (cookies manquants ou expirés). "
+            "Configurez COOKIES_FILE ou COOKIES_BROWSER pour y accéder."
+        )
+
     if (
         "this content is unreachable. use --cookies" in lower
         or "use --cookies for the authentication" in lower
