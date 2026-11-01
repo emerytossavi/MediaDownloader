@@ -128,6 +128,9 @@ def _classify_gallerydl_error(stderr: str) -> None:
             )
         raise ExtractorError("Accès refusé par la plateforme (protection anti-bot ou restriction).")
 
+    if "unsupported url" in lower:
+        raise ExtractorError("Ce format ou type de contenu n'est pas pris en charge par l'extracteur d'images (gallery-dl).")
+
     lines = [
         line.strip()
         for line in stderr.splitlines()
