@@ -290,8 +290,9 @@ def _classify_ytdlp_error(stderr: str, url: str = "") -> None:
         or "requires authentication" in lower
         or "cannot parse data" in lower
     ):
+        target_name = "Story" if ("/stories/" in url_lower or "story.php" in url_lower or "/stories/" in lower) else "vidéo ou publication"
         raise AuthenticationRequiredError(
-            "Cette vidéo ou publication Facebook nécessite un compte connecté (cookies manquants ou expirés). "
+            f"Cette {target_name} Facebook nécessite un compte connecté (cookies manquants ou expirés). "
             "Configurez COOKIES_FILE ou COOKIES_BROWSER pour y accéder."
         )
 
