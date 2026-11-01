@@ -40,21 +40,24 @@ class ThrottledProgressNotifier:
         text: str,
         force: bool = False,
         show_cancel: bool = True,
+        custom_markup: Optional[InlineKeyboardMarkup] = None,
+        parse_mode: Optional[str] = None,
     ) -> None:
         """Update the progress message text if interval elapsed or forced."""
         async with self._lock:
             now = time.monotonic()
             if not force and (now - self._last_update_time < self.min_interval):
                 return
-            if text == self._last_text and not force:
+            if text == self._last_text and not force and custom_markup is None:
                 return
 
-            reply_markup = self._build_markup(show_cancel)
+            reply_markup = custom_markup if custom_markup is not None else self._build_markup(show_cancel)
 
             try:
                 await self.message.edit_text(
                     text=text,
                     reply_markup=reply_markup,
+                    parse_mode=parse_mode,
                 )
                 self._last_update_time = now
                 self._last_text = text

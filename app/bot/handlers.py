@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Optional
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -87,6 +87,7 @@ class BotHandlers:
         application.add_handler(CommandHandler("start", self.start_command))
         application.add_handler(CommandHandler("help", self.help_command))
         application.add_handler(CallbackQueryHandler(self.cancel_callback, pattern=r"^cancel:"))
+        application.add_handler(CallbackQueryHandler(self.choice_callback, pattern=r"^choice:"))
         application.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_url_message)
         )
@@ -98,6 +99,32 @@ class BotHandlers:
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message:
             await update.message.reply_text(HELP_MESSAGE, parse_mode="Markdown")
+
+    async def choice_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if not query or not query.data:
+            return
+
+        parts = query.data.split(":", 2)
+        if len(parts) != 3:
+            return
+
+        action, task_id = parts[1], parts[2]
+        task = await self.task_manager.get_task(task_id)
+
+        if not task:
+            await query.answer("Cette tâche est déjà terminée ou n'existe plus.")
+            return
+
+        if query.from_user and query.from_user.id != task.user_id:
+            await query.answer("Vous ne pouvez pas modifier le choix d'un autre utilisateur.", show_alert=True)
+            return
+
+        task.set_choice(action)
+        if action == "split":
+            await query.answer("✂️ Option choisie : Scinder en plusieurs parties (HD).")
+        else:
+            await query.answer("🗜️ Option choisie : Compresser en 1 seul fichier.")
 
     async def cancel_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -223,6 +250,60 @@ class BotHandlers:
             # Update status to Queued
             await notifier.update(STATUS_QUEUED, force=True, show_cancel=True)
 
+            user_strategy = "auto"
+            try:
+                probe_info = await self.router.probe_media(task.url)
+            except Exception as probe_err:
+                logger.debug(f"Media probe error for {task.url}: {probe_err}")
+                probe_info = None
+
+            if probe_info and not task.cancel_event.is_set():
+                est_size = probe_info.get("estimated_size") or 0
+                dur = probe_info.get("duration") or 0
+                title = probe_info.get("title") or "Vidéo"
+
+                if est_size > self.config.max_file_size or (dur > 600 and est_size == 0):
+                    dur_str = f"{int(dur // 60)}m {int(dur % 60):02d}s" if dur else "Inconnue"
+                    size_mb = est_size // (1024 * 1024) if est_size else "> 50"
+
+                    prompt_text = (
+                        f"📹 *Média volumineux détecté*\n\n"
+                        f"• Titre : {title}\n"
+                        f"• Durée : {dur_str}\n"
+                        f"• Poids estimé en haute qualité : ~{size_mb} Mo\n\n"
+                        f"_La limite d'envoi par fichier sur Telegram est de 50 Mo._\n\n"
+                        f"Que souhaitez-vous faire ?\n"
+                        f"• *Scinder* : Découpe en plusieurs parties de < 50 Mo en qualité originale.\n"
+                        f"• *Compresser* : Réduit la qualité pour tenir dans 1 seul fichier.\n\n"
+                        f"⏱ _Sans réponse sous 30 secondes, le média sera automatiquement scindé._"
+                    )
+
+                    markup = InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("✂️ Scinder (Haute qualité)", callback_data=f"choice:split:{task.task_id}"),
+                            InlineKeyboardButton("🗜️ Compresser (1 seul fichier)", callback_data=f"choice:compress:{task.task_id}"),
+                        ],
+                        [
+                            InlineKeyboardButton("🛑 Annuler", callback_data=f"cancel:{task.task_id}"),
+                        ],
+                    ])
+
+                    await notifier.update(prompt_text, force=True, show_cancel=False, custom_markup=markup, parse_mode="Markdown")
+
+                    try:
+                        await asyncio.wait_for(task.user_choice_event.wait(), timeout=30.0)
+                        user_strategy = task.user_choice or "split"
+                    except asyncio.TimeoutError:
+                        logger.info(f"[Task {task.task_id}] Délai de 30s écoulé sans réponse : scission automatique choisie par défaut.")
+                        user_strategy = "split"
+                        try:
+                            await notifier.update("⏱ *Délai de 30s écoulé* : Scission automatique sélectionnée.", force=True, show_cancel=True, parse_mode="Markdown")
+                        except Exception:
+                            pass
+
+                    if user_strategy == "cancel" or task.cancel_event.is_set():
+                        raise DownloadCancelledError()
+
             async with self.task_manager.semaphore:
                 if task.cancel_event.is_set():
                     raise DownloadCancelledError()
@@ -232,7 +313,11 @@ class BotHandlers:
                 await notifier.update(STATUS_DOWNLOADING, force=True, show_cancel=True)
 
                 # Download media
-                executed_tool, inspection = await self.router.execute_download(task, job_dir)
+                executed_tool, inspection = await self.router.execute_download(
+                    task=task,
+                    target_dir=job_dir,
+                    strategy=user_strategy,
+                )
 
                 if task.cancel_event.is_set():
                     raise DownloadCancelledError()

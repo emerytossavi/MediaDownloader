@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import List
 from telegram import Bot, InputMediaPhoto, InputMediaVideo
 from telegram.error import TelegramError
@@ -111,11 +112,18 @@ class MediaSender:
 
     async def _send_single_video(self, chat_id: int, item: MediaItem) -> bool:
         try:
+            caption_text = f"🎥 {item.filename}"
+            part_match = re.search(r"_part(\d+)_of_(\d+)", item.filename)
+            if part_match:
+                p_idx, p_total = part_match.groups()
+                clean_title = re.sub(r"_part\d+_of_\d+", "", item.path.stem).replace("_", " ")
+                caption_text = f"🎥 {clean_title} (Partie {p_idx}/{p_total})"
+
             with open(item.path, "rb") as f:
                 await self.bot.send_video(
                     chat_id=chat_id,
                     video=f,
-                    caption=f"🎥 {item.filename}",
+                    caption=caption_text,
                     supports_streaming=True,
                     read_timeout=120,
                     write_timeout=120,
