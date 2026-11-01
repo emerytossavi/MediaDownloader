@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 import shutil
 from typing import List, Optional
 from app.services.task_manager import DownloadTask
+from app.utils.filesystem import force_garbage_collection
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -79,10 +81,21 @@ async def download_with_ytdlp(
         "30",
         "--retries",
         "3",
+        "--buffer-size",
+        "16K",
+        "--http-chunk-size",
+        "1M",
+        "--no-cache-dir",
     ]
 
-    # Support des runtimes JavaScript (Node, Deno, Bun) pour débloquer les challenges YouTube sans warning
-    for r_name in ["deno", "node", "bun", "quickjs"]:
+    # Runtimes JS légers uniquement (quickjs, deno) pour éviter la surconsommation mémoire de Node.js (V8: 150-200 Mo)
+    # Sur environnements PaaS / VPS contraints, Node.js provoque des crashs OOM (Killed)
+    enable_node = os.getenv("ENABLE_NODE_JS_RUNTIME", "false").lower() in ("true", "1")
+    js_candidates = ["quickjs", "deno"]
+    if enable_node:
+        js_candidates.append("node")
+
+    for r_name in js_candidates:
         r_path = shutil.which(r_name)
         if r_path:
             cmd.extend(["--js-runtimes", f"{r_name}:{r_path}"])
@@ -101,11 +114,17 @@ async def download_with_ytdlp(
 
     logger.info(f"[Task {task.task_id}] Executing yt-dlp command: {' '.join(cmd[:5])} ...")
 
+    force_garbage_collection()
+    sub_env = os.environ.copy()
+    sub_env["NODE_OPTIONS"] = "--max-old-space-size=32"
+    sub_env["PYTHONUNBUFFERED"] = "1"
+
     try:
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=sub_env,
         )
         task.process = process
 
@@ -133,6 +152,7 @@ async def download_with_ytdlp(
         raise DownloadCancelledError("Téléchargement annulé.") from exc
     finally:
         task.process = None
+        force_garbage_collection()
 
     stderr_text = stderr_data.decode("utf-8", errors="replace") if stderr_data else ""
     stdout_text = stdout_data.decode("utf-8", errors="replace") if stdout_data else ""

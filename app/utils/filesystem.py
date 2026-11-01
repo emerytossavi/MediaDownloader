@@ -111,3 +111,14 @@ def safe_resolve_child(parent_dir: Path, child_name: str | Path) -> Path:
             f"Path traversal detected: {child_name} escapes parent {parent_resolved}"
         )
     return child_resolved
+
+
+def force_garbage_collection() -> None:
+    """Force Python garbage collection and trim unmapped glibc heap memory on Linux."""
+    import gc
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass

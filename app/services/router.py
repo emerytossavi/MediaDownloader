@@ -79,8 +79,12 @@ class ExtractorRouter:
 
     def detect_extractors(self, url: str) -> List[ExtractorType]:
         """Inspect URL using native extractor matching in gallery-dl and yt-dlp and return valid engines."""
-        # Les flux Google Video (CDN YouTube) sont exclusivement vidéo/audio et ne doivent jamais être confiés à gallery-dl
-        if is_googlevideo_url(url):
+        lower = url.lower()
+
+        # Fast path pour les domaines vidéo purs : évite de charger des centaines de mégaoctets d'extracteurs en RAM
+        if is_googlevideo_url(url) or any(
+            d in lower for d in ("youtube.com", "youtu.be", "googlevideo.com", "vimeo.com", "dailymotion.com", "twitch.tv")
+        ):
             return [ExtractorType.YTDLP]
 
         gallery_supported = False
@@ -97,9 +101,8 @@ class ExtractorRouter:
         try:
             import yt_dlp.extractor  # type: ignore
 
-            ies = yt_dlp.extractor.gen_extractors()
-            for ie in ies:
-                if ie.suitable(url) and ie.IE_NAME.lower() != "generic":
+            for ie_cls in yt_dlp.extractor.gen_extractor_classes():
+                if ie_cls.suitable(url) and getattr(ie_cls, "IE_NAME", "").lower() != "generic":
                     ytdlp_supported = True
                     break
         except Exception as exc:
