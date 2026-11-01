@@ -414,3 +414,122 @@ async def test_download_twitter_video_quality_selection(tmp_path: Path):
     assert "vid123" in files[0].name
 
 
+@pytest.mark.asyncio
+async def test_download_with_ytdlp_allow_large_limits_resolution(tmp_path: Path):
+    from app.services.ytdlp_downloader import download_with_ytdlp
+
+    task = DownloadTask(
+        task_id="test-ytdlp-hd",
+        user_id=123,
+        chat_id=123,
+        url="https://example.com/video",
+    )
+
+    captured_cmds = []
+
+    async def fake_proc(*args, **kwargs):
+        captured_cmds.append(list(args))
+        proc = AsyncMock()
+        proc.communicate.return_value = (b"", b"")
+        proc.returncode = 0
+        # Create a dummy downloaded file so it doesn't raise ContentNotFoundError
+        (tmp_path / "video.mp4").write_bytes(b"content")
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_proc):
+        await download_with_ytdlp(
+            task=task,
+            target_dir=tmp_path,
+            max_file_size=50 * 1024 * 1024,
+            timeout=10,
+            allow_large=True,
+        )
+
+    assert len(captured_cmds) == 1
+    cmd = captured_cmds[0]
+    assert "-f" in cmd
+    f_idx = cmd.index("-f") + 1
+    format_arg = cmd[f_idx]
+    assert "height<=1080" in format_arg
+    assert "--concurrent-fragments" in cmd
+    assert cmd[cmd.index("--concurrent-fragments") + 1] == "1"
+
+
+@pytest.mark.asyncio
+async def test_download_with_ytdlp_sigkill_fallback_success(tmp_path: Path):
+    from app.services.ytdlp_downloader import download_with_ytdlp
+
+    task = DownloadTask(
+        task_id="test-ytdlp-sigkill",
+        user_id=123,
+        chat_id=123,
+        url="https://example.com/video",
+    )
+
+    call_count = 0
+    captured_formats = []
+
+    async def fake_proc(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        cmd = list(args)
+        if "-f" in cmd:
+            captured_formats.append(cmd[cmd.index("-f") + 1])
+
+        proc = AsyncMock()
+        if call_count == 1:
+            # First attempt: killed by SIGKILL (code -9)
+            proc.communicate.return_value = (b"", b"")
+            proc.returncode = -9
+        else:
+            # Fallback attempt succeeds
+            proc.communicate.return_value = (b"", b"")
+            proc.returncode = 0
+            (tmp_path / "video_fallback.mp4").write_bytes(b"fallback_bytes")
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_proc):
+        await download_with_ytdlp(
+            task=task,
+            target_dir=tmp_path,
+            max_file_size=50 * 1024 * 1024,
+            timeout=10,
+            allow_large=True,
+        )
+
+    assert call_count == 2
+    assert "height<=720" in captured_formats[1]
+    assert (tmp_path / "video_fallback.mp4").exists()
+
+
+@pytest.mark.asyncio
+async def test_download_with_ytdlp_sigkill_exhausted_raises(tmp_path: Path):
+    from app.services.ytdlp_downloader import ExtractorError, download_with_ytdlp
+
+    task = DownloadTask(
+        task_id="test-ytdlp-sigkill-exhausted",
+        user_id=123,
+        chat_id=123,
+        url="https://example.com/video",
+    )
+
+    async def fake_proc(*args, **kwargs):
+        proc = AsyncMock()
+        proc.communicate.return_value = (b"", b"")
+        proc.returncode = -9
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_proc):
+        with pytest.raises(ExtractorError) as exc_info:
+            await download_with_ytdlp(
+                task=task,
+                target_dir=tmp_path,
+                max_file_size=50 * 1024 * 1024,
+                timeout=10,
+                allow_large=True,
+            )
+
+    assert "Out of Memory" in str(exc_info.value) or "mémoire" in str(exc_info.value).lower()
+
+
+
