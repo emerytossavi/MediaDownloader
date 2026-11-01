@@ -343,3 +343,74 @@ async def test_download_facebook_story_bypass(tmp_path: Path):
     files = list(tmp_path.glob("*.mp4"))
     assert len(files) == 1
 
+
+@pytest.mark.asyncio
+async def test_download_twitter_video_quality_selection(tmp_path: Path):
+    from unittest.mock import MagicMock
+    from app.services.twitter_downloader import download_twitter_media
+
+    task = DownloadTask(
+        task_id="test-tw-video",
+        user_id=123,
+        chat_id=123,
+        url="https://x.com/user/status/2116150843737309329",
+    )
+
+    # 1080p is ~1GB (exceeds 50MB limit), 320p is ~30MB (fits within 50MB limit)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "tweet": {
+            "media": {
+                "videos": [
+                    {
+                        "id": "vid123",
+                        "duration": 800.0,
+                        "variants": [
+                            {
+                                "content_type": "video/mp4",
+                                "bitrate": 10_000_000,
+                                "url": "https://video.twimg.com/vid_1080p.mp4",
+                            },
+                            {
+                                "content_type": "video/mp4",
+                                "bitrate": 300_000,
+                                "url": "https://video.twimg.com/vid_320p.mp4",
+                            },
+                        ],
+                    }
+                ]
+            }
+        }
+    }
+
+    mock_sess = MagicMock()
+
+    def mock_get(url, stream=False, timeout=10):
+        m = MagicMock()
+        m.status_code = 200
+        if "vid_1080p" in url:
+            m.headers = {"content-length": str(1000 * 1024 * 1024)}
+            m.content = b"huge_content" * 1000
+        else:
+            m.headers = {"content-length": str(30 * 1024 * 1024)}
+            m.iter_content.return_value = [b"valid_video_bytes" * 100]
+        return m
+
+    mock_sess.get.side_effect = mock_get
+
+    with patch("curl_cffi.requests.get", return_value=mock_resp), \
+         patch("curl_cffi.requests.Session", return_value=mock_sess):
+        success = await download_twitter_media(
+            task=task,
+            target_dir=tmp_path,
+            max_file_size=50 * 1024 * 1024,
+            timeout=10,
+        )
+
+    assert success is True
+    files = list(tmp_path.glob("*.mp4"))
+    assert len(files) == 1
+    assert "vid123" in files[0].name
+
+
