@@ -157,3 +157,57 @@ async def test_router_tiktok_fallback(tmp_path: Path):
         assert inspection.has_valid_media is True
         assert inspection.valid_items[0].filename == "tiktok_123.mp4"
 
+
+def test_is_facebook_video_url():
+    from app.services.facebook_downloader import is_facebook_video_url
+    assert is_facebook_video_url("https://www.facebook.com/share/v/1ESATe4yFX/") is True
+    assert is_facebook_video_url("https://www.facebook.com/share/r/12345/") is True
+    assert is_facebook_video_url("https://www.facebook.com/reel/2211281456080141/") is True
+    assert is_facebook_video_url("https://www.facebook.com/watch/?v=123456789") is True
+    assert is_facebook_video_url("https://fb.watch/xyz123/") is True
+    assert is_facebook_video_url("https://www.facebook.com/username/videos/123456789/") is True
+    assert is_facebook_video_url("https://www.facebook.com/photo.php?fbid=123") is False
+    assert is_facebook_video_url("https://www.facebook.com/username/posts/123") is False
+    assert is_facebook_video_url("https://youtube.com/watch?v=123") is False
+
+
+@pytest.mark.asyncio
+async def test_router_facebook_video_never_falls_back_to_photos(tmp_path: Path):
+    router = ExtractorRouter(max_file_size=50 * 1024 * 1024, download_timeout=60)
+    task = DownloadTask(task_id="t_fb_vid", user_id=1, chat_id=1, url="https://www.facebook.com/share/v/1ESATe4yFX/")
+
+    async def fake_ytdlp(*args, **kwargs):
+        raise ExtractorError("Le fichier vidéo dépasse la limite maximale autorisée (50 Mo) pour Telegram.")
+
+    async def fake_fb_photos(*args, **kwargs):
+        pytest.fail("download_facebook_photos should NEVER be called on a Facebook video URL!")
+
+    with patch("app.services.router.download_with_ytdlp", side_effect=fake_ytdlp), \
+         patch("app.services.router.download_facebook_photos", side_effect=fake_fb_photos), \
+         patch("app.services.router.resolve_facebook_url", return_value="https://www.facebook.com/reel/2211281456080141/"):
+        with pytest.raises(ExtractorError) as exc_info:
+            await router.execute_download(task, tmp_path)
+        assert "dépasse la limite maximale" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_probe_media_facebook_video():
+    router = ExtractorRouter(max_file_size=50 * 1024 * 1024, download_timeout=60)
+    url = "https://www.facebook.com/share/v/1ESATe4yFX/"
+
+    fake_stdout = b"331.65;NA;1926.857;Titre Test Facebook\n"
+    proc = AsyncMock()
+    proc.communicate.return_value = (fake_stdout, b"")
+    proc.returncode = 0
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc), \
+         patch("app.services.router.resolve_facebook_url", return_value="https://www.facebook.com/reel/2211281456080141/"):
+        probe_info = await router.probe_media(url)
+
+    assert probe_info is not None
+    assert probe_info["duration"] == 331.65
+    assert probe_info["title"] == "Titre Test Facebook"
+    # estimated size = 1926.857 * 1000 / 8 * 331.65 =~ 79,879,907
+    assert probe_info["estimated_size"] > 70 * 1024 * 1024
+
+
