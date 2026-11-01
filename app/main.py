@@ -10,6 +10,7 @@ from app.config import AppConfig, ConfigError
 from app.services.download_tracker import DownloadTracker
 from app.services.router import ExtractorRouter
 from app.services.task_manager import TaskManager
+from app.services.user_tracker import UserTracker
 from app.utils.filesystem import cleanup_abandoned_jobs, ensure_directory
 from app.utils.logging import get_logger, setup_logging
 
@@ -51,14 +52,33 @@ def main() -> None:
     # Tracker for tracking downloads by category (completed vs failed with reasons)
     tracker = DownloadTracker(file_path=config.history_file)
 
+    # Tracker pour enregistrer les utilisateurs et diffuser les notifications au lancement
+    user_tracker = UserTracker(
+        file_path=config.users_file,
+        seed_history_file=config.history_file,
+    )
+
+    async def on_startup(application) -> None:
+        if config.notify_on_startup:
+            logger.info("Vérification des notifications de démarrage...")
+            stats = await user_tracker.notify_users_on_startup(
+                bot=application.bot,
+                message=config.startup_notification_message,
+            )
+            logger.info(
+                f"Notification de démarrage : {stats['sent']} envoyée(s), "
+                f"{stats['failed']} échec(s) sur {stats['total']} utilisateur(s)."
+            )
+
     # Build python-telegram-bot application
-    app = ApplicationBuilder().token(config.telegram_bot_token).build()
+    app = ApplicationBuilder().token(config.telegram_bot_token).post_init(on_startup).build()
 
     handlers = BotHandlers(
         config=config,
         task_manager=task_manager,
         router=router,
         tracker=tracker,
+        user_tracker=user_tracker,
     )
     handlers.register(app)
 

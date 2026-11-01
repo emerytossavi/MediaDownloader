@@ -16,6 +16,8 @@ DEFAULT_CONCURRENT_PER_USER: int = 1
 DEFAULT_DOWNLOAD_TIMEOUT: int = 300
 DEFAULT_TEMP_DIR: str = "/tmp/telegram-downloader"
 DEFAULT_HISTORY_FILE: str = "downloads_history.json"
+DEFAULT_USERS_FILE: str = "users_history.json"
+DEFAULT_STARTUP_NOTIFICATION_MESSAGE: str = "Hey, du nouveau toi ? \nT'as du contenu à me partager ? \nJe suis prêt à tout te telécharger !"
 DEFAULT_LOG_LEVEL: str = "INFO"
 
 
@@ -36,6 +38,9 @@ class AppConfig:
     gallerydl_bin: str
     ffmpeg_bin: Optional[str]
     history_file: Path = Path(DEFAULT_HISTORY_FILE)
+    users_file: Path = Path(DEFAULT_USERS_FILE)
+    notify_on_startup: bool = True
+    startup_notification_message: str = DEFAULT_STARTUP_NOTIFICATION_MESSAGE
     cookies_file: Optional[Path] = None
     cookies_browser: Optional[str] = None
 
@@ -105,6 +110,14 @@ class AppConfig:
         history_file_str = os.getenv("DOWNLOAD_HISTORY_FILE", DEFAULT_HISTORY_FILE).strip()
         history_file = Path(history_file_str)
 
+        users_file_str = os.getenv("USERS_FILE", os.getenv("USERS_HISTORY_FILE", DEFAULT_USERS_FILE)).strip()
+        users_file = Path(users_file_str)
+
+        notify_str = os.getenv("NOTIFY_ON_STARTUP", "true").strip().lower()
+        notify_on_startup = notify_str not in ("0", "false", "no", "off", "disable")
+
+        startup_msg = os.getenv("STARTUP_NOTIFICATION_MESSAGE", DEFAULT_STARTUP_NOTIFICATION_MESSAGE)
+
         cookies_str = os.getenv("COOKIES_FILE")
         cookies_file = Path(cookies_str).resolve() if cookies_str and cookies_str.strip() else None
 
@@ -123,6 +136,9 @@ class AppConfig:
             gallerydl_bin=gallerydl_bin,
             ffmpeg_bin=ffmpeg_bin,
             history_file=history_file,
+            users_file=users_file,
+            notify_on_startup=notify_on_startup,
+            startup_notification_message=startup_msg,
             cookies_file=cookies_file,
             cookies_browser=cookies_browser,
         )
