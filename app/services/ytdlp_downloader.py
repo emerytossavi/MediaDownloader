@@ -53,8 +53,16 @@ async def download_with_ytdlp(
 
     v_budget = max(1, max_size_mb - 5)
     if allow_large:
-        # Priorité à la qualité HD maximale (la vidéo sera scindée si nécessaire)
-        format_selector = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+        # Priorité HD bornée à 1080p (ou MAX_VIDEO_HEIGHT) pour éviter les flux 1440p/4K qui provoquent des crashs OOM (SIGKILL -9)
+        max_height = int(os.getenv("MAX_VIDEO_HEIGHT", "1080"))
+        format_selector = (
+            f"bestvideo[height<={max_height}][ext=mp4]+bestaudio[ext=m4a]/"
+            f"bestvideo[height<={max_height}]+bestaudio/"
+            f"best[height<={max_height}]/"
+            f"bestvideo[height<=720]+bestaudio/"
+            f"best[height<=720]/"
+            f"best"
+        )
     else:
         format_selector = (
             f"b[filesize<={max_size_mb}M]/b[filesize_approx<={max_size_mb}M]/"
@@ -94,6 +102,8 @@ async def download_with_ytdlp(
         "16K",
         "--http-chunk-size",
         "1M",
+        "--concurrent-fragments",
+        "1",
         "--no-cache-dir",
     ])
 
@@ -173,6 +183,57 @@ async def download_with_ytdlp(
         logger.warning(
             f"[Task {task.task_id}] yt-dlp failed (code {process.returncode}): {stderr_text[:500]}"
         )
+        if process.returncode in (-9, 137):
+            logger.warning(
+                f"[Task {task.task_id}] yt-dlp a été tué par SIGKILL (code {process.returncode}) - probable dépassement de quota mémoire RAM (OOM)."
+            )
+            # Nettoyage des résidus éventuels de téléchargement
+            if target_dir.exists():
+                for f in target_dir.iterdir():
+                    if f.is_file() and (f.suffix in {".part", ".ytdl", ".temp"} or f.name.endswith(".part")):
+                        try:
+                            f.unlink()
+                        except OSError:
+                            pass
+
+            # Si nous étions en mode allow_large ou vidéo volumineuse, tentative de secours en format économique pré-assemblé (<=720p)
+            if allow_large or max_size_mb > 50:
+                logger.info(
+                    f"[Task {task.task_id}] Tentative de secours avec format pré-assemblé économique en mémoire (<=720p)..."
+                )
+                fallback_cmd = list(cmd)
+                try:
+                    f_idx = fallback_cmd.index("-f") + 1
+                    fallback_cmd[f_idx] = "b[height<=720]/best[height<=720]/best[height<=480]/best"
+                except (ValueError, IndexError):
+                    pass
+
+                force_garbage_collection()
+                try:
+                    fb_proc = await asyncio.create_subprocess_exec(
+                        *fallback_cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        env=sub_env,
+                    )
+                    task.process = fb_proc
+                    await asyncio.wait_for(fb_proc.communicate(), timeout=float(timeout))
+                    if fb_proc.returncode == 0:
+                        downloaded_files = list(target_dir.iterdir()) if target_dir.exists() else []
+                        if downloaded_files:
+                            logger.info(f"[Task {task.task_id}] Secours basse résolution réussi après OOM.")
+                            return
+                except Exception as fb_exc:
+                    logger.warning(f"[Task {task.task_id}] Échec du secours post-OOM: {fb_exc}")
+                finally:
+                    task.process = None
+                    force_garbage_collection()
+
+            raise ExtractorError(
+                "Le serveur a interrompu le processus pour dépassement de mémoire RAM (Out of Memory / SIGKILL). "
+                "Sur cet hébergement, privilégiez l'option 'Compresser' ou une vidéo plus courte."
+            )
+
         _classify_ytdlp_error(stderr_text, task.url)
 
     # Vérification anti-orphelin : si la vidéo a été avortée car > 50M mais que le flux audio a été téléchargé
@@ -289,7 +350,7 @@ def _classify_ytdlp_error(stderr: str, url: str = "") -> None:
 
     # Generic extractor error with first relevant line
     lines = [line.strip() for line in stderr.splitlines() if "ERROR:" in line]
-    error_detail = lines[0] if lines else "Échec de l'extraction multimédia."
+    error_detail = lines[0] if lines else ("Échec de l'extraction multimédia." if stderr.strip() else "Échec de l'extraction multimédia (le processus s'est interrompu sans message d'erreur).")
     raise ExtractorError(error_detail)
 
 
