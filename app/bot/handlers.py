@@ -50,6 +50,7 @@ from app.services.download_tracker import DownloadTracker
 from app.services.media_inspector import MediaInspectionResult
 from app.services.router import ExtractorRouter
 from app.services.task_manager import DownloadTask, TaskLimitExceededError, TaskManager
+from app.services.user_tracker import UserTracker
 from app.services.ytdlp_downloader import (
     AuthenticationRequiredError,
     ContentNotFoundError,
@@ -76,11 +77,25 @@ class BotHandlers:
         task_manager: TaskManager,
         router: ExtractorRouter,
         tracker: Optional[DownloadTracker] = None,
+        user_tracker: Optional[UserTracker] = None,
     ) -> None:
         self.config = config
         self.task_manager = task_manager
         self.router = router
         self.tracker = tracker or DownloadTracker(config.history_file)
+        self.user_tracker = user_tracker or UserTracker(
+            file_path=config.users_file,
+            seed_history_file=config.history_file,
+        )
+
+    async def _track_user(self, update: Update) -> None:
+        """Enregistre ou met à jour l'utilisateur ayant généré l'interaction."""
+        user = update.effective_user
+        if user and not getattr(user, "is_bot", False):
+            try:
+                await self.user_tracker.record_user(user)
+            except Exception as exc:
+                logger.debug(f"Erreur enregistrement utilisateur {getattr(user, 'id', None)}: {exc}")
 
     def register(self, application: Application) -> None:
         """Register all dispatch handlers on the python-telegram-bot application."""
@@ -93,14 +108,17 @@ class BotHandlers:
         )
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._track_user(update)
         if update.message:
             await update.message.reply_text(START_MESSAGE, parse_mode="Markdown")
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._track_user(update)
         if update.message:
             await update.message.reply_text(HELP_MESSAGE, parse_mode="Markdown")
 
     async def choice_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._track_user(update)
         query = update.callback_query
         if not query or not query.data:
             return
@@ -127,6 +145,7 @@ class BotHandlers:
             await query.answer("🗜️ Option choisie : Compresser en 1 seul fichier.")
 
     async def cancel_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._track_user(update)
         query = update.callback_query
         if not query or not query.data:
             return
@@ -155,6 +174,7 @@ class BotHandlers:
             await query.answer("La tâche est déjà terminée.")
 
     async def handle_url_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._track_user(update)
         if not update.message or not update.message.text:
             return
 
