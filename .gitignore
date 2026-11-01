@@ -61,3 +61,5 @@ htmlcov/
 
 
 downloads_history.json
+users_history.json
+*.tmp
