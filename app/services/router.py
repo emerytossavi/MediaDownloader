@@ -7,9 +7,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional, Tuple
 from app.services.facebook_downloader import (
-    download_facebook_media,
     download_facebook_photos,
-    is_facebook_story_url,
     is_facebook_url,
     resolve_facebook_url,
 )
@@ -286,29 +284,6 @@ class ExtractorRouter:
                         return ExtractorType.GALLERYDL, inspection
             except Exception as exc:
                 logger.debug(f"[Task {task.task_id}] L'extracteur TikTok photo a échoué: {exc}")
-
-        # Tentative d'extraction directe des Stories Facebook via getmyfb
-        if is_facebook_story_url(task.url):
-            try:
-                extracted = await download_facebook_media(
-                    task=task,
-                    target_dir=target_dir,
-                    timeout=self.download_timeout,
-                    cookies_file=self.cookies_file,
-                )
-                if extracted:
-                    inspection = inspect_directory(target_dir, max_file_size=self.max_file_size)
-                    if inspection.has_valid_media or inspection.has_oversized_media:
-                        logger.info(f"[Task {task.task_id}] Story Facebook extraite directement avec succès via getmyfb.")
-                        extractor_used = (
-                            ExtractorType.GALLERYDL
-                            if any(i.media_type == MediaType.PHOTO for i in inspection.valid_items)
-                            and not any(i.media_type == MediaType.VIDEO for i in inspection.valid_items)
-                            else ExtractorType.YTDLP
-                        )
-                        return extractor_used, inspection
-            except Exception as exc:
-                logger.debug(f"[Task {task.task_id}] Extraction directe story Facebook via getmyfb a échoué: {exc}")
 
         last_error: Optional[Exception] = None
         executed_tool: ExtractorType = primary
