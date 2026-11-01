@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 from app.services.facebook_downloader import (
     download_facebook_photos,
+    is_facebook_story_url,
     is_facebook_url,
     resolve_facebook_url,
 )
@@ -81,8 +82,8 @@ class ExtractorRouter:
         """Inspect URL using native extractor matching in gallery-dl and yt-dlp and return valid engines."""
         lower = url.lower()
 
-        # Fast path pour les domaines vidéo purs : évite de charger des centaines de mégaoctets d'extracteurs en RAM
-        if is_googlevideo_url(url) or any(
+        # Fast path pour les domaines vidéo purs et Stories : évite de charger des extracteurs non supportés
+        if is_googlevideo_url(url) or is_facebook_story_url(url) or any(
             d in lower for d in ("youtube.com", "youtu.be", "googlevideo.com", "vimeo.com", "dailymotion.com", "twitch.tv")
         ):
             return [ExtractorType.YTDLP]
@@ -331,7 +332,9 @@ class ExtractorRouter:
 
             except Exception as exc:
                 logger.warning(f"[Task {task.task_id}] {tool.value} failed: {exc}")
-                last_error = exc
+                # Ne pas écraser une erreur spécifique d'authentification par une erreur générique subséquente
+                if last_error is None or not isinstance(last_error, AuthenticationRequiredError):
+                    last_error = exc
 
         # Tentative d'extraction spécialisée des photos/carrousels Instagram si aucun média n'a été produit
         if is_instagram_url(task.url) and not task.cancel_event.is_set():
