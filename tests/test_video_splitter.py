@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.services.video_splitter import (
+    compress_video_file,
     find_ffmpeg_binary,
     get_video_duration,
     split_video_file,
@@ -72,3 +73,71 @@ def test_split_video_file_success(tmp_path: Path):
     for p in parts:
         assert p.exists()
         assert "_part" in p.name
+
+
+def test_compress_video_file_under_size(tmp_path: Path):
+    dummy_file = tmp_path / "small.mp4"
+    dummy_file.write_bytes(b"small_content")
+
+    res = compress_video_file(dummy_file, target_size_bytes=1000)
+    assert res == [dummy_file]
+    assert dummy_file.exists()
+
+
+def test_compress_video_file_success(tmp_path: Path):
+    oversized = tmp_path / "large_movie.mp4"
+    oversized.write_bytes(b"x" * 200)
+
+    def fake_subprocess_run(cmd, *args, **kwargs):
+        # Duration probe:
+        if "-i" in cmd and "-preset" not in cmd:
+            m = MagicMock()
+            m.stderr = "Duration: 00:03:00.00,"
+            return m
+        # Compress command:
+        out_file = Path(cmd[-1])
+        out_file.write_bytes(b"c" * 80)
+        m = MagicMock()
+        m.returncode = 0
+        return m
+
+    with patch("app.services.video_splitter.find_ffmpeg_binary", return_value="ffmpeg"), \
+         patch("subprocess.run", side_effect=fake_subprocess_run):
+        res = compress_video_file(oversized, target_size_bytes=100, ffmpeg_bin="ffmpeg")
+
+    assert len(res) == 1
+    assert res[0].name == "large_movie_compressed.mp4"
+    assert res[0].exists()
+    assert not oversized.exists()
+
+
+def test_compress_video_file_fallback_to_split(tmp_path: Path):
+    oversized = tmp_path / "large_movie.mp4"
+    oversized.write_bytes(b"x" * 200)
+
+    def fake_subprocess_run(cmd, *args, **kwargs):
+        # Duration probe:
+        if "-i" in cmd and "-preset" not in cmd and "-ss" not in cmd:
+            m = MagicMock()
+            m.stderr = "Duration: 00:03:00.00,"
+            return m
+        # Compress command fails:
+        if "-preset" in cmd:
+            m = MagicMock()
+            m.returncode = 1
+            return m
+        # Split command succeeds:
+        out_file = Path(cmd[-1])
+        out_file.write_bytes(b"split_part")
+        m = MagicMock()
+        m.returncode = 0
+        return m
+
+    with patch("app.services.video_splitter.find_ffmpeg_binary", return_value="ffmpeg"), \
+         patch("subprocess.run", side_effect=fake_subprocess_run):
+        res = compress_video_file(oversized, target_size_bytes=100, ffmpeg_bin="ffmpeg")
+
+    assert len(res) >= 2
+    for p in res:
+        assert "_part" in p.name
+    assert not oversized.exists()
