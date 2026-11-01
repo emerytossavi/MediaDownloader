@@ -10,6 +10,7 @@ from app.services.facebook_downloader import (
     download_facebook_photos,
     is_facebook_story_url,
     is_facebook_url,
+    is_facebook_video_url,
     resolve_facebook_url,
 )
 from app.services.gallerydl_downloader import download_with_gallerydl
@@ -26,7 +27,7 @@ from app.services.tiktok_photo_downloader import (
     resolve_tiktok_url,
 )
 from app.services.twitter_downloader import download_twitter_media, extract_tweet_id, is_twitter_url
-from app.services.video_splitter import split_video_file
+from app.services.video_splitter import compress_video_file, split_video_file
 from app.services.ytdlp_downloader import (
     AuthenticationRequiredError,
     ContentNotFoundError,
@@ -143,9 +144,31 @@ class ExtractorRouter:
             if f.is_file() and f.suffix.lower() in video_exts and f.stat().st_size > self.max_file_size:
                 split_video_file(f, target_part_size=target_part_size, ffmpeg_bin=self.ffmpeg_bin)
 
+    def _compress_oversized_videos(self, target_dir: Path) -> None:
+        """Find oversized video files in target_dir and compress them to <= max_file_size."""
+        video_exts = {".mp4", ".mkv", ".webm", ".mov", ".avi"}
+        target_size = min(self.max_file_size, 48 * 1024 * 1024)
+        for f in list(target_dir.iterdir()):
+            if f.is_file() and f.suffix.lower() in video_exts and f.stat().st_size > self.max_file_size:
+                compress_video_file(f, target_size_bytes=target_size, ffmpeg_bin=self.ffmpeg_bin)
+
     async def probe_media(self, url: str) -> Optional[dict]:
         """Probe media metadata (filesize, duration, title) quickly without downloading."""
         lower = url.lower()
+
+        # Ignore les stories Facebook qui nécessitent une authentification
+        if is_facebook_story_url(url):
+            return None
+
+        # Résolution éventuelle des liens de partage Facebook pour le probing
+        if is_facebook_url(url):
+            try:
+                resolved_fb = await asyncio.to_thread(resolve_facebook_url, url)
+                if resolved_fb:
+                    url = resolved_fb
+                    lower = url.lower()
+            except Exception:
+                pass
 
         # 1. Check Twitter via FxTwitter API
         if is_twitter_url(url):
@@ -185,9 +208,9 @@ class ExtractorRouter:
                 except Exception as exc:
                     logger.debug(f"Twitter probe failed: {exc}")
 
-        # 2. Check yt-dlp supported platforms (e.g. YouTube, Vimeo, Dailymotion)
-        if any(d in lower for d in ("youtube.com", "youtu.be", "vimeo.com", "dailymotion.com")) or (
-            not is_tiktok_url(url) and not is_facebook_url(url) and not is_instagram_url(url)
+        # 2. Check yt-dlp supported platforms (e.g. YouTube, Vimeo, Dailymotion, Facebook)
+        if any(d in lower for d in ("youtube.com", "youtu.be", "vimeo.com", "dailymotion.com", "facebook.com", "fb.watch")) or (
+            not is_tiktok_url(url) and not is_instagram_url(url)
         ):
             try:
                 cmd = [
@@ -198,7 +221,7 @@ class ExtractorRouter:
                     "--socket-timeout",
                     "10",
                     "--print",
-                    "%(duration)s;%(filesize,filesize_approx)s;%(title)s",
+                    "%(duration)s;%(filesize,filesize_approx)s;%(tbr)s;%(title)s",
                     url,
                 ]
                 proc = await asyncio.create_subprocess_exec(
@@ -211,12 +234,18 @@ class ExtractorRouter:
                     lines = [l.strip() for l in stdout_data.decode("utf-8", errors="replace").splitlines() if l.strip()]
                     if lines:
                         out = lines[-1]
-                        parts = out.split(";", 2)
-                        if len(parts) >= 2:
-                            dur_raw, size_raw = parts[0].strip(), parts[1].strip()
-                            title = parts[2].strip() if len(parts) > 2 else "Vidéo"
+                        parts = out.split(";", 3)
+                        if len(parts) >= 3:
+                            dur_raw, size_raw, tbr_raw = parts[0].strip(), parts[1].strip(), parts[2].strip()
+                            title = parts[3].strip() if len(parts) > 3 else "Vidéo"
                             duration = float(dur_raw) if dur_raw and dur_raw != "NA" else 0.0
                             size = int(size_raw) if size_raw and size_raw != "NA" else 0
+                            if size == 0 and tbr_raw and tbr_raw != "NA" and duration > 0:
+                                try:
+                                    tbr_val = float(tbr_raw)
+                                    size = int((tbr_val * 1000 / 8.0) * duration)
+                                except (ValueError, TypeError):
+                                    pass
                             return {
                                 "title": title,
                                 "duration": duration,
@@ -307,7 +336,7 @@ class ExtractorRouter:
                         ffmpeg_bin=self.ffmpeg_bin,
                         cookies_file=self.cookies_file,
                         cookies_browser=self.cookies_browser,
-                        allow_large=(strategy == "split"),
+                        allow_large=(strategy in ("split", "compress")),
                     )
                 else:
                     await download_with_gallerydl(
@@ -321,7 +350,10 @@ class ExtractorRouter:
 
                 # Inspect directory to see if any media was produced
                 result = inspect_directory(target_dir, max_file_size=self.max_file_size)
-                if strategy == "split" or result.has_oversized_media:
+                if strategy == "compress":
+                    self._compress_oversized_videos(target_dir)
+                    result = inspect_directory(target_dir, max_file_size=self.max_file_size)
+                elif strategy == "split" or result.has_oversized_media:
                     self._split_oversized_videos(target_dir)
                     result = inspect_directory(target_dir, max_file_size=self.max_file_size)
 
@@ -355,7 +387,13 @@ class ExtractorRouter:
                 logger.debug(f"[Task {task.task_id}] Échec extracteur Instagram photo: {exc}")
 
         # Tentative d'extraction spécialisée des photos Facebook si aucun média n'a été produit
-        if is_facebook_url(task.url) and not task.cancel_event.is_set():
+        # (NE JAMAIS appeler l'extracteur photo sur des URLs de vidéo/Reels ou si la vidéo dépassait la taille max)
+        if (
+            is_facebook_url(task.url)
+            and not is_facebook_video_url(task.url)
+            and not task.cancel_event.is_set()
+            and not (last_error and "dépasse la limite maximale" in str(last_error).lower())
+        ):
             try:
                 fb_photos = await download_facebook_photos(
                     task=task,
@@ -424,7 +462,10 @@ class ExtractorRouter:
 
         # If both attempts failed or produced no files:
         final_inspection = inspect_directory(target_dir, max_file_size=self.max_file_size)
-        if strategy == "split" or final_inspection.has_oversized_media:
+        if strategy == "compress":
+            self._compress_oversized_videos(target_dir)
+            final_inspection = inspect_directory(target_dir, max_file_size=self.max_file_size)
+        elif strategy == "split" or final_inspection.has_oversized_media:
             self._split_oversized_videos(target_dir)
             final_inspection = inspect_directory(target_dir, max_file_size=self.max_file_size)
 
