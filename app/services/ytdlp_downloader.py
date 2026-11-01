@@ -57,10 +57,15 @@ async def download_with_ytdlp(
         max_height = int(os.getenv("MAX_VIDEO_HEIGHT", "1080"))
         format_selector = (
             f"bestvideo[height<={max_height}][ext=mp4]+bestaudio[ext=m4a]/"
+            f"bestvideo[width<={max_height}][ext=mp4]+bestaudio[ext=m4a]/"
             f"bestvideo[height<={max_height}]+bestaudio/"
+            f"bestvideo[width<={max_height}]+bestaudio/"
             f"best[height<={max_height}]/"
+            f"best[width<={max_height}]/"
             f"bestvideo[height<=720]+bestaudio/"
+            f"bestvideo[width<=720]+bestaudio/"
             f"best[height<=720]/"
+            f"best[width<=720]/"
             f"best"
         )
     else:
@@ -70,12 +75,18 @@ async def download_with_ytdlp(
             f"bestvideo[filesize<={v_budget}M]+bestaudio[filesize<=5M]/"
             f"bestvideo[filesize_approx<={v_budget}M]+bestaudio[filesize_approx<=5M]/"
             f"bestvideo[height<=1080][filesize<={v_budget}M]+bestaudio/"
+            f"bestvideo[width<=1080][filesize<={v_budget}M]+bestaudio/"
             f"bestvideo[height<=720][filesize<={v_budget}M]+bestaudio/"
+            f"bestvideo[width<=720][filesize<={v_budget}M]+bestaudio/"
             f"bestvideo[height<=480][filesize<={v_budget}M]+bestaudio/"
+            f"bestvideo[width<=480][filesize<={v_budget}M]+bestaudio/"
             f"bestvideo[height<=360][filesize<={v_budget}M]+bestaudio/"
+            f"bestvideo[width<=360][filesize<={v_budget}M]+bestaudio/"
             f"bestvideo[filesize<={max_size_mb}M]+bestaudio/"
-            f"bestvideo[height<=720]+bestaudio/best[height<=720]/"
-            f"bestvideo[height<=480]+bestaudio/best[height<=480]/"
+            f"bestvideo[height<=720]+bestaudio/bestvideo[width<=720]+bestaudio/"
+            f"best[height<=720]/best[width<=720]/"
+            f"bestvideo[height<=480]+bestaudio/bestvideo[width<=480]+bestaudio/"
+            f"best[height<=480]/best[width<=480]/"
             f"bestvideo+bestaudio/best"
         )
 
