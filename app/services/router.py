@@ -302,6 +302,7 @@ class ExtractorRouter:
                 tw_ok = await download_twitter_media(
                     task=task,
                     target_dir=target_dir,
+                    max_file_size=self.max_file_size,
                     timeout=self.download_timeout,
                 )
                 if tw_ok:

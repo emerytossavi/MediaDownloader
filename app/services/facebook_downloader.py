@@ -14,6 +14,7 @@ from curl_cffi import requests
 
 from app.services.task_manager import DownloadTask
 from app.utils.logging import get_logger
+from app.utils.network import stream_download_to_file
 
 logger = get_logger(__name__)
 
@@ -95,10 +96,8 @@ async def download_facebook_media(
                     sd_links = re.findall(r'href="([^"]+)"[^>]*class="[^"]*sd-button', stxt)
                     video_url = hd_links[0] if hd_links else (sd_links[0] if sd_links else None)
                     if video_url and not task.cancel_event.is_set():
-                        vr = sess.get(video_url, timeout=timeout)
-                        if vr.status_code == 200 and len(vr.content) > 1024:
-                            vpath = target_dir / "001_facebook_video.mp4"
-                            vpath.write_bytes(vr.content)
+                        vpath = target_dir / "001_facebook_video.mp4"
+                        if stream_download_to_file(sess, video_url, vpath, timeout=timeout, cancel_event=task.cancel_event):
                             logger.info(f"[Task {task.task_id}] Vidéo/Story Facebook téléchargée via service de contournement.")
                             return 1
 
@@ -115,10 +114,8 @@ async def download_facebook_media(
                                     img_src = decoded_url
                             except Exception:
                                 pass
-                        ir = sess.get(img_src, timeout=timeout)
-                        if ir.status_code == 200 and len(ir.content) > 1024:
-                            ipath = target_dir / "001_facebook_photo.jpg"
-                            ipath.write_bytes(ir.content)
+                        ipath = target_dir / "001_facebook_photo.jpg"
+                        if stream_download_to_file(sess, img_src, ipath, timeout=timeout, cancel_event=task.cancel_event):
                             logger.info(f"[Task {task.task_id}] Image/Story Facebook téléchargée via service de contournement.")
                             return 1
             except Exception as service_err:
@@ -156,16 +153,11 @@ async def download_facebook_media(
                 for idx, img_url in enumerate(candidates[:10], 1):
                     if task.cancel_event.is_set():
                         break
-                    try:
-                        r = sess.get(img_url, timeout=timeout)
-                        if r.status_code == 200 and len(r.content) > 1024:
-                            filepath = target_dir / f"{idx:03d}_facebook_photo.jpg"
-                            filepath.write_bytes(r.content)
-                            downloaded += 1
-                            if og_images and len(candidates) == 1:
-                                break
-                    except Exception as err:
-                        logger.debug(f"[Task {task.task_id}] Erreur téléchargement image {idx}: {err}")
+                    filepath = target_dir / f"{idx:03d}_facebook_photo.jpg"
+                    if stream_download_to_file(sess, img_url, filepath, timeout=timeout, cancel_event=task.cancel_event):
+                        downloaded += 1
+                        if og_images and len(candidates) == 1:
+                            break
 
                 return downloaded
             except Exception as e:

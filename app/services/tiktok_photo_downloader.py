@@ -12,6 +12,7 @@ from curl_cffi import requests
 
 from app.services.task_manager import DownloadTask
 from app.utils.logging import get_logger
+from app.utils.network import stream_download_to_file
 
 logger = get_logger(__name__)
 
@@ -198,13 +199,11 @@ def _extract_tiktok_media_sync(task: DownloadTask, target_dir: Path, timeout: in
 
             # C'est une vidéo : lien direct sans filigrane
             video_url = data.get("play") or data.get("wmplay")
-            if video_url:
+            if video_url and not task.cancel_event.is_set():
                 logger.info(f"[Task {task.task_id}] Téléchargement vidéo TikTok via TikWM...")
-                v_resp = sess.get(video_url, timeout=timeout)
-                if v_resp.status_code == 200 and v_resp.content:
-                    video_path = target_dir / f"tiktok_{post_id}.mp4"
-                    video_path.write_bytes(v_resp.content)
-                    logger.info(f"[Task {task.task_id}] Vidéo TikTok ({len(v_resp.content)} octets) téléchargée avec succès.")
+                video_path = target_dir / f"tiktok_{post_id}.mp4"
+                if stream_download_to_file(sess, video_url, video_path, timeout=timeout, cancel_event=task.cancel_event):
+                    logger.info(f"[Task {task.task_id}] Vidéo TikTok téléchargée avec succès.")
                     return True
 
         # 2. Tentative de secours via Lovetik API
@@ -220,11 +219,9 @@ def _extract_tiktok_media_sync(task: DownloadTask, target_dir: Path, timeout: in
                 links = l_data.get("links", [])
                 for link in links:
                     dl_url = link.get("a")
-                    if dl_url:
-                        dl_resp = sess.get(dl_url, timeout=timeout)
-                        if dl_resp.status_code == 200 and dl_resp.content:
-                            video_path = target_dir / f"tiktok_{post_id}.mp4"
-                            video_path.write_bytes(dl_resp.content)
+                    if dl_url and not task.cancel_event.is_set():
+                        video_path = target_dir / f"tiktok_{post_id}.mp4"
+                        if stream_download_to_file(sess, dl_url, video_path, timeout=timeout, cancel_event=task.cancel_event):
                             logger.info(f"[Task {task.task_id}] Vidéo TikTok téléchargée via Lovetik.")
                             return True
         except Exception as l_err:
