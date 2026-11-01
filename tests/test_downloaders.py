@@ -313,35 +313,57 @@ def test_resolve_facebook_url_login_redirect():
 
 
 @pytest.mark.asyncio
-async def test_download_facebook_story_bypass(tmp_path: Path):
+async def test_download_facebook_photos_direct(tmp_path: Path):
     from unittest.mock import MagicMock
-    from app.services.facebook_downloader import download_facebook_media
+    from app.services.facebook_downloader import download_facebook_media, is_blocked_media_url
+
+    assert is_blocked_media_url("https://ssscdn.io/getmyfb/abc123") is True
+    assert is_blocked_media_url("https://getmyfb.com/process") is True
+    assert is_blocked_media_url("https://scontent.fcoo4-1.fna.fbcdn.net/image.jpg") is False
 
     task = DownloadTask(
-        task_id="test-fb-story",
+        task_id="test-fb-photos",
         user_id=123,
         chat_id=123,
-        url="https://www.facebook.com/share/1C53jcvcfs/",
+        url="https://www.facebook.com/user/posts/12345",
     )
 
-    mock_service_resp = MagicMock()
-    mock_service_resp.status_code = 200
-    mock_service_resp.text = '<a href="https://example.com/video.mp4" class="bxmfunk-button hd-button">HD</a>'
-
-    mock_vid_resp = MagicMock()
-    mock_vid_resp.status_code = 200
-    mock_vid_resp.content = b"fake_video_mp4_content_" * 100
+    mock_page_resp = MagicMock()
+    mock_page_resp.status_code = 200
+    mock_page_resp.text = (
+        '<html><head>'
+        '<meta property="og:image" content="https://scontent.fcoo4-1.fna.fbcdn.net/v/t39.30808-6/sample.jpg" />'
+        '</head></html>'
+    )
 
     mock_sess = MagicMock()
-    mock_sess.post.return_value = mock_service_resp
-    mock_sess.get.return_value = mock_vid_resp
+    mock_sess.get.return_value = mock_page_resp
 
-    with patch("curl_cffi.requests.Session", return_value=mock_sess):
+    with patch("curl_cffi.requests.Session", return_value=mock_sess), \
+         patch("app.services.facebook_downloader.stream_download_to_file", return_value=True):
         success = await download_facebook_media(task, tmp_path, timeout=10)
 
     assert success is True
-    files = list(tmp_path.glob("*.mp4"))
-    assert len(files) == 1
+
+
+def test_ytdlp_facebook_auth_required_error():
+    from app.services.ytdlp_downloader import AuthenticationRequiredError, _classify_ytdlp_error
+
+    task = DownloadTask(
+        task_id="test-fb-auth",
+        user_id=123,
+        chat_id=123,
+        url="https://www.facebook.com/share/1dqmosDpjr/",
+    )
+
+    with pytest.raises(AuthenticationRequiredError) as exc_info:
+        _classify_ytdlp_error(
+            "ERROR: [facebook] 122129877950989521: This video is only available for registered users. Use --cookies-from-browser or --cookies for the authentication.",
+            task.url,
+        )
+
+    assert "Facebook" in str(exc_info.value)
+    assert "COOKIES_FILE" in str(exc_info.value)
 
 
 @pytest.mark.asyncio

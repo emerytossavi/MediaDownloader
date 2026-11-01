@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import html
 import re
 import urllib.parse
@@ -17,6 +16,18 @@ from app.utils.logging import get_logger
 from app.utils.network import stream_download_to_file
 
 logger = get_logger(__name__)
+
+# Liste noire de domaines/URLs malveillants, publicitaires ou honeypots connus
+BLOCKED_MEDIA_PATTERNS = [
+    "getmyfb.com",
+    "ssscdn.io/getmyfb",
+]
+
+
+def is_blocked_media_url(url: str) -> bool:
+    """Vérifie si une URL de média provient d'un service honeypot ou publicitaire."""
+    lower = url.lower()
+    return any(p in lower for p in BLOCKED_MEDIA_PATTERNS)
 
 
 def is_facebook_url(url: str) -> bool:
@@ -69,13 +80,16 @@ async def download_facebook_media(
     timeout: int = 30,
     cookies_file: Optional[Path] = None,
 ) -> bool:
-    """Extract and download media (stories, videos, photos) from a Facebook post using curl_cffi and bypass services."""
-    logger.info(f"[Task {task.task_id}] Tentative d'extraction des médias Facebook...")
+    """Extract and download public photos from a Facebook post using direct HTML inspection."""
+    logger.info(f"[Task {task.task_id}] Tentative d'extraction des photos Facebook...")
 
     def _fetch() -> int:
         sess = requests.Session(impersonate="chrome124")
         try:
-            # 1. Attempt bypass extraction via getmyfb service (handles stories, reels, videos, photos)
+            if task.cancel_event.is_set():
+                return 0
+
+            # Extraction directe par inspection HTML pour les photos publiques
             try:
                 target_url = task.url
                 if "login.php" in target_url or "next=" in target_url:
@@ -84,66 +98,29 @@ async def download_facebook_media(
                     if "next" in qs and qs["next"]:
                         target_url = urllib.parse.unquote(qs["next"][0])
 
-                service_resp = sess.post(
-                    "https://getmyfb.com/process",
-                    data={"id": target_url},
-                    headers={"X-Requested-With": "XMLHttpRequest"},
-                    timeout=timeout,
-                )
-                if service_resp.status_code == 200:
-                    stxt = service_resp.text
-                    hd_links = re.findall(r'href="([^"]+)"[^>]*class="[^"]*hd-button', stxt)
-                    sd_links = re.findall(r'href="([^"]+)"[^>]*class="[^"]*sd-button', stxt)
-                    video_url = hd_links[0] if hd_links else (sd_links[0] if sd_links else None)
-                    if video_url and not task.cancel_event.is_set():
-                        vpath = target_dir / "001_facebook_video.mp4"
-                        if stream_download_to_file(sess, video_url, vpath, timeout=timeout, cancel_event=task.cancel_event):
-                            logger.info(f"[Task {task.task_id}] Vidéo/Story Facebook téléchargée via service de contournement.")
-                            return 1
-
-                    # Check for photo if no video found
-                    img_matches = re.findall(r'class="results-item-image"\s+src="([^"]+)"', stxt)
-                    if img_matches and not task.cancel_event.is_set():
-                        img_src = img_matches[0]
-                        if "/getmyfb/p/" in img_src:
-                            b64_part = img_src.split("/getmyfb/p/")[-1]
-                            b64_part += "=" * ((4 - len(b64_part) % 4) % 4)
-                            try:
-                                decoded_url = base64.b64decode(b64_part).decode("utf-8", "ignore")
-                                if decoded_url.startswith("http"):
-                                    img_src = decoded_url
-                            except Exception:
-                                pass
-                        ipath = target_dir / "001_facebook_photo.jpg"
-                        if stream_download_to_file(sess, img_src, ipath, timeout=timeout, cancel_event=task.cancel_event):
-                            logger.info(f"[Task {task.task_id}] Image/Story Facebook téléchargée via service de contournement.")
-                            return 1
-            except Exception as service_err:
-                logger.debug(f"[Task {task.task_id}] Service getmyfb indisponible: {service_err}")
-
-            if task.cancel_event.is_set():
-                return 0
-
-            # 2. Fallback to direct HTML inspection for public photos
-            try:
-                resp = sess.get(task.url, timeout=timeout, allow_redirects=True)
+                resp = sess.get(target_url, timeout=timeout, allow_redirects=True)
                 if resp.status_code != 200:
                     return 0
                 txt = resp.text
 
-                # Look for og:image
+                # Extraction og:image
                 og_images = [
                     html.unescape(x)
                     for x in re.findall(r'<meta property=\"og:image\" content=\"(.*?)\"', txt)
+                    if not is_blocked_media_url(x)
                 ]
 
-                # Look for scontent image links
+                # Extraction liens CDN scontent
                 cdn_matches = re.findall(r'https:\\/\\/scontent[^\s"\',]+\.jpg[^\s"\',]*', txt)
-                cdn_urls = [html.unescape(u.replace(r"\/", "/")) for u in cdn_matches]
+                cdn_urls = [
+                    html.unescape(u.replace(r"\/", "/"))
+                    for u in cdn_matches
+                    if not is_blocked_media_url(u)
+                ]
 
                 candidates: List[str] = []
                 for u in og_images + cdn_urls:
-                    if u not in candidates and "scontent" in u:
+                    if u not in candidates and "scontent" in u and not is_blocked_media_url(u):
                         candidates.append(u)
 
                 if not candidates:
