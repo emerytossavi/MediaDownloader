@@ -42,6 +42,24 @@ def is_facebook_story_url(url: str) -> bool:
     return is_facebook_url(url) and any(domain in lower for domain in ["/stories/", "story.php"])
 
 
+def is_facebook_video_url(url: str) -> bool:
+    """Check if the Facebook URL specifically targets a video or reel."""
+    lower = url.lower()
+    if not is_facebook_url(lower):
+        return False
+    video_markers = [
+        "/reel/",
+        "/reels/",
+        "/videos/",
+        "/watch",
+        "fb.watch",
+        "/share/v/",
+        "/share/r/",
+        "video.php",
+    ]
+    return any(m in lower for m in video_markers)
+
+
 def resolve_facebook_url(url: str, timeout: int = 10) -> str:
     """Resolve redirect for Facebook share URLs (e.g. facebook.com/share/...)."""
     lower = url.lower()
@@ -81,6 +99,10 @@ async def download_facebook_media(
     cookies_file: Optional[Path] = None,
 ) -> bool:
     """Extract and download public photos from a Facebook post using direct HTML inspection."""
+    if is_facebook_video_url(task.url):
+        logger.info(f"[Task {task.task_id}] URL Facebook identifiée comme vidéo : extraction de photos ignorée.")
+        return False
+
     logger.info(f"[Task {task.task_id}] Tentative d'extraction des photos Facebook...")
 
     def _fetch() -> int:
