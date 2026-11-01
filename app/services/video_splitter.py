@@ -138,3 +138,80 @@ def split_video_file(
     video_path.unlink(missing_ok=True)
     logger.info(f"{num_parts} parties créées avec succès pour {video_path.name}.")
     return parts
+
+
+def compress_video_file(
+    video_path: Path,
+    target_size_bytes: int = 48 * 1024 * 1024,
+    ffmpeg_bin: Optional[str] = None,
+) -> List[Path]:
+    """Compress an oversized video into a single file <= target_size_bytes using ffmpeg.
+
+    If compression succeeds and produces a file <= target_size_bytes, returns [compressed_file].
+    Otherwise falls back to split_video_file.
+    """
+    if not video_path.exists():
+        return []
+
+    file_size = video_path.stat().st_size
+    if file_size <= target_size_bytes:
+        return [video_path]
+
+    actual_ffmpeg = find_ffmpeg_binary(ffmpeg_bin)
+    if not actual_ffmpeg:
+        logger.warning("ffmpeg introuvable pour la compression : repli sur la scission.")
+        return split_video_file(video_path, target_part_size=target_size_bytes, ffmpeg_bin=ffmpeg_bin)
+
+    duration = get_video_duration(video_path, ffmpeg_bin=actual_ffmpeg)
+    if not duration or duration <= 0:
+        logger.warning(f"Durée introuvable pour {video_path}, repli sur la scission.")
+        return split_video_file(video_path, target_part_size=target_size_bytes, ffmpeg_bin=ffmpeg_bin)
+
+    # Calcul du bitrate cible avec marge de sécurité (90% du budget max)
+    safe_target_bytes = int(target_size_bytes * 0.90)
+    total_bitrate = int((safe_target_bytes * 8) / duration)  # bps
+    audio_bitrate = 96 * 1000  # 96 kbps audio
+    video_bitrate = max(100 * 1000, total_bitrate - audio_bitrate)
+
+    out_compressed = video_path.parent / f"{video_path.stem}_compressed{video_path.suffix}"
+    logger.info(
+        f"Compression de {video_path.name} ({file_size // (1024*1024)} Mo, {duration:.1f}s) "
+        f"vers ~{safe_target_bytes // (1024*1024)} Mo (v_bitrate={video_bitrate // 1000}k)..."
+    )
+
+    cmd = [
+        actual_ffmpeg,
+        "-y",
+        "-i",
+        str(video_path),
+        "-c:v",
+        "libx264",
+        "-b:v",
+        f"{video_bitrate // 1000}k",
+        "-maxrate",
+        f"{int(video_bitrate * 1.2) // 1000}k",
+        "-bufsize",
+        f"{int(video_bitrate * 2) // 1000}k",
+        "-preset",
+        "fast",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "96k",
+        str(out_compressed),
+    ]
+
+    try:
+        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+        if res.returncode == 0 and out_compressed.exists() and 0 < out_compressed.stat().st_size <= target_size_bytes:
+            video_path.unlink(missing_ok=True)
+            logger.info(f"Compression réussie pour {video_path.name} -> {out_compressed.name} ({out_compressed.stat().st_size // (1024*1024)} Mo).")
+            return [out_compressed]
+        else:
+            logger.warning("Fichier compressé absent ou encore trop volumineux. Repli sur la scission.")
+            out_compressed.unlink(missing_ok=True)
+            return split_video_file(video_path, target_part_size=target_size_bytes, ffmpeg_bin=ffmpeg_bin)
+    except Exception as exc:
+        logger.warning(f"Erreur compression vidéo ffmpeg: {exc}. Repli sur la scission.")
+        out_compressed.unlink(missing_ok=True)
+        return split_video_file(video_path, target_part_size=target_size_bytes, ffmpeg_bin=ffmpeg_bin)
