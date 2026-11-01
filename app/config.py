@@ -97,6 +97,10 @@ class AppConfig:
             ffmpeg_bin = ffmpeg_bin.strip()
         else:
             ffmpeg_bin = shutil.which("ffmpeg")
+            if not ffmpeg_bin:
+                home_ffmpeg = Path.home() / "bin" / "ffmpeg"
+                if home_ffmpeg.exists() and home_ffmpeg.is_file():
+                    ffmpeg_bin = str(home_ffmpeg)
 
         history_file_str = os.getenv("DOWNLOAD_HISTORY_FILE", DEFAULT_HISTORY_FILE).strip()
         history_file = Path(history_file_str)
