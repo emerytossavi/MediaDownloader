@@ -43,6 +43,12 @@ class DownloadTask:
     error_message: Optional[str] = None
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     process: Optional[asyncio.subprocess.Process] = None
+    user_choice_event: asyncio.Event = field(default_factory=asyncio.Event)
+    user_choice: Optional[str] = None
+
+    def set_choice(self, choice: str) -> None:
+        self.user_choice = choice
+        self.user_choice_event.set()
 
     @property
     def duration_seconds(self) -> Optional[float]:

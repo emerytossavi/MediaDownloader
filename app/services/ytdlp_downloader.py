@@ -43,6 +43,7 @@ async def download_with_ytdlp(
     ffmpeg_bin: Optional[str] = None,
     cookies_file: Optional[Path] = None,
     cookies_browser: Optional[str] = None,
+    allow_large: bool = False,
 ) -> None:
     """Download video or audio media using yt-dlp via an isolated asynchronous subprocess."""
     max_size_mb = max(1, max_file_size // (1024 * 1024))
@@ -51,20 +52,24 @@ async def download_with_ytdlp(
     out_tmpl = str(target_dir / "%(title).80s-%(id)s.%(ext)s")
 
     v_budget = max(1, max_size_mb - 5)
-    format_selector = (
-        f"b[filesize<={max_size_mb}M]/b[filesize_approx<={max_size_mb}M]/"
-        f"bestvideo[ext=mp4][filesize<={v_budget}M]+bestaudio[ext=m4a][filesize<=5M]/"
-        f"bestvideo[filesize<={v_budget}M]+bestaudio[filesize<=5M]/"
-        f"bestvideo[filesize_approx<={v_budget}M]+bestaudio[filesize_approx<=5M]/"
-        f"bestvideo[height<=1080][filesize<={v_budget}M]+bestaudio/"
-        f"bestvideo[height<=720][filesize<={v_budget}M]+bestaudio/"
-        f"bestvideo[height<=480][filesize<={v_budget}M]+bestaudio/"
-        f"bestvideo[height<=360][filesize<={v_budget}M]+bestaudio/"
-        f"bestvideo[filesize<={max_size_mb}M]+bestaudio/"
-        f"bestvideo[height<=720]+bestaudio/best[height<=720]/"
-        f"bestvideo[height<=480]+bestaudio/best[height<=480]/"
-        f"bestvideo+bestaudio/best"
-    )
+    if allow_large:
+        # Priorité à la qualité HD maximale (la vidéo sera scindée si nécessaire)
+        format_selector = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+    else:
+        format_selector = (
+            f"b[filesize<={max_size_mb}M]/b[filesize_approx<={max_size_mb}M]/"
+            f"bestvideo[ext=mp4][filesize<={v_budget}M]+bestaudio[ext=m4a][filesize<=5M]/"
+            f"bestvideo[filesize<={v_budget}M]+bestaudio[filesize<=5M]/"
+            f"bestvideo[filesize_approx<={v_budget}M]+bestaudio[filesize_approx<=5M]/"
+            f"bestvideo[height<=1080][filesize<={v_budget}M]+bestaudio/"
+            f"bestvideo[height<=720][filesize<={v_budget}M]+bestaudio/"
+            f"bestvideo[height<=480][filesize<={v_budget}M]+bestaudio/"
+            f"bestvideo[height<=360][filesize<={v_budget}M]+bestaudio/"
+            f"bestvideo[filesize<={max_size_mb}M]+bestaudio/"
+            f"bestvideo[height<=720]+bestaudio/best[height<=720]/"
+            f"bestvideo[height<=480]+bestaudio/best[height<=480]/"
+            f"bestvideo+bestaudio/best"
+        )
 
     cmd: List[str] = [
         bin_path,
@@ -72,8 +77,12 @@ async def download_with_ytdlp(
         "--restrict-filenames",
         "-f",
         format_selector,
-        "--max-filesize",
-        f"{max_size_mb}M",
+    ]
+
+    if not allow_large:
+        cmd.extend(["--max-filesize", f"{max_size_mb}M"])
+
+    cmd.extend([
         "-o",
         out_tmpl,
         "--no-warnings",
@@ -86,7 +95,7 @@ async def download_with_ytdlp(
         "--http-chunk-size",
         "1M",
         "--no-cache-dir",
-    ]
+    ])
 
     # Runtimes JS légers uniquement (quickjs, deno) pour éviter la surconsommation mémoire de Node.js (V8: 150-200 Mo)
     # Sur environnements PaaS / VPS contraints, Node.js provoque des crashs OOM (Killed)

@@ -26,7 +26,8 @@ from app.services.tiktok_photo_downloader import (
     is_tiktok_url,
     resolve_tiktok_url,
 )
-from app.services.twitter_downloader import download_twitter_media, is_twitter_url
+from app.services.twitter_downloader import download_twitter_media, extract_tweet_id, is_twitter_url
+from app.services.video_splitter import split_video_file
 from app.services.ytdlp_downloader import (
     AuthenticationRequiredError,
     ContentNotFoundError,
@@ -34,6 +35,7 @@ from app.services.ytdlp_downloader import (
     ExtractorError,
 )
 from app.utils.logging import get_logger
+from curl_cffi import requests
 
 logger = get_logger(__name__)
 
@@ -134,10 +136,103 @@ class ExtractorRouter:
         extractors = self.detect_extractors(url)
         return extractors[0] if extractors else ExtractorType.UNKNOWN
 
+    def _split_oversized_videos(self, target_dir: Path) -> None:
+        """Find oversized video files in target_dir and split them into parts <= max_file_size."""
+        video_exts = {".mp4", ".mkv", ".webm", ".mov", ".avi"}
+        target_part_size = min(self.max_file_size, 48 * 1024 * 1024)
+        for f in list(target_dir.iterdir()):
+            if f.is_file() and f.suffix.lower() in video_exts and f.stat().st_size > self.max_file_size:
+                split_video_file(f, target_part_size=target_part_size, ffmpeg_bin=self.ffmpeg_bin)
+
+    async def probe_media(self, url: str) -> Optional[dict]:
+        """Probe media metadata (filesize, duration, title) quickly without downloading."""
+        lower = url.lower()
+
+        # 1. Check Twitter via FxTwitter API
+        if is_twitter_url(url):
+            tweet_id = extract_tweet_id(url)
+            if tweet_id:
+                try:
+                    def _probe_tw() -> Optional[dict]:
+                        sess = requests.Session(impersonate="chrome124")
+                        try:
+                            r = sess.get(f"https://api.fxtwitter.com/status/{tweet_id}", timeout=5)
+                            if r.status_code == 200:
+                                tdata = r.json().get("tweet", {})
+                                media = tdata.get("media") or {}
+                                videos = media.get("videos") or []
+                                if not videos and "all" in media:
+                                    videos = [x for x in media["all"] if x.get("type") == "video"]
+                                if videos:
+                                    vid = videos[0]
+                                    dur = float(vid.get("duration") or 0.0)
+                                    variants = [
+                                        v for v in vid.get("variants", [])
+                                        if v.get("content_type") == "video/mp4"
+                                    ]
+                                    variants.sort(key=lambda x: x.get("bitrate", 0), reverse=True)
+                                    best_br = variants[0].get("bitrate", 0) if variants else 0
+                                    est_size = int((best_br / 8.0) * dur) if dur and best_br else 0
+                                    return {
+                                        "title": tdata.get("text", "Vidéo Twitter")[:40],
+                                        "duration": dur,
+                                        "estimated_size": est_size,
+                                    }
+                        finally:
+                            sess.close()
+                        return None
+
+                    return await asyncio.wait_for(asyncio.to_thread(_probe_tw), timeout=6.0)
+                except Exception as exc:
+                    logger.debug(f"Twitter probe failed: {exc}")
+
+        # 2. Check yt-dlp supported platforms (e.g. YouTube, Vimeo, Dailymotion)
+        if any(d in lower for d in ("youtube.com", "youtu.be", "vimeo.com", "dailymotion.com")) or (
+            not is_tiktok_url(url) and not is_facebook_url(url) and not is_instagram_url(url)
+        ):
+            try:
+                cmd = [
+                    self.ytdlp_bin,
+                    "--no-playlist",
+                    "--simulate",
+                    "--no-warnings",
+                    "--socket-timeout",
+                    "10",
+                    "--print",
+                    "%(duration)s;%(filesize,filesize_approx)s;%(title)s",
+                    url,
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout_data, _ = await asyncio.wait_for(proc.communicate(), timeout=8.0)
+                if proc.returncode == 0 and stdout_data:
+                    lines = [l.strip() for l in stdout_data.decode("utf-8", errors="replace").splitlines() if l.strip()]
+                    if lines:
+                        out = lines[-1]
+                        parts = out.split(";", 2)
+                        if len(parts) >= 2:
+                            dur_raw, size_raw = parts[0].strip(), parts[1].strip()
+                            title = parts[2].strip() if len(parts) > 2 else "Vidéo"
+                            duration = float(dur_raw) if dur_raw and dur_raw != "NA" else 0.0
+                            size = int(size_raw) if size_raw and size_raw != "NA" else 0
+                            return {
+                                "title": title,
+                                "duration": duration,
+                                "estimated_size": size,
+                            }
+            except Exception as exc:
+                logger.debug(f"yt-dlp probe failed for {url}: {exc}")
+
+        return None
+
     async def execute_download(
         self,
         task: DownloadTask,
         target_dir: Path,
+        strategy: str = "auto",
     ) -> Tuple[ExtractorType, MediaInspectionResult]:
         """Download media using the primary strategy, with automatic fallback if 0 files produced."""
         # Résolution des liens de partage raccourcis (ex: facebook.com/share/)
@@ -236,6 +331,7 @@ class ExtractorRouter:
                         ffmpeg_bin=self.ffmpeg_bin,
                         cookies_file=self.cookies_file,
                         cookies_browser=self.cookies_browser,
+                        allow_large=(strategy == "split"),
                     )
                 else:
                     await download_with_gallerydl(
@@ -249,6 +345,10 @@ class ExtractorRouter:
 
                 # Inspect directory to see if any media was produced
                 result = inspect_directory(target_dir, max_file_size=self.max_file_size)
+                if strategy == "split" or result.has_oversized_media:
+                    self._split_oversized_videos(target_dir)
+                    result = inspect_directory(target_dir, max_file_size=self.max_file_size)
+
                 if result.has_valid_media or result.has_oversized_media:
                     return executed_tool, result
 
@@ -346,6 +446,10 @@ class ExtractorRouter:
 
         # If both attempts failed or produced no files:
         final_inspection = inspect_directory(target_dir, max_file_size=self.max_file_size)
+        if strategy == "split" or final_inspection.has_oversized_media:
+            self._split_oversized_videos(target_dir)
+            final_inspection = inspect_directory(target_dir, max_file_size=self.max_file_size)
+
         if final_inspection.has_valid_media or final_inspection.has_oversized_media:
             return executed_tool, final_inspection
 
